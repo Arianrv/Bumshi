@@ -1,0 +1,120 @@
+/* Bumshi admin — dark + light themes, LTR/RTL aware.
+   Layout inspired by the 3x-ui panel; colors driven by CSS variables so the
+   whole app re-themes cleanly and text contrast stays correct in both modes.
+   Directional rules use logical properties (inline-start/end) so switching to
+   Persian (dir="rtl") flips the layout natively. */
+
+:root,
+:root[data-theme="dark"] {
+  --bg: #0f1720;
+  --panel: #16212e;
+  --panel-2: #1c2a3a;
+  --border: #253346;
+  --text: #e6edf3;      /* light text on dark */
+  --muted: #8496a9;
+  --accent: #2dd4bf;
+  --danger: #f87171;
+  --btn-bg: #14b8a6;    /* bright teal */
+  --btn-text: #04120f;  /* dark text reads well on bright teal */
+  --btn-bg-hover: #2dd4bf;
+}
+
+:root[data-theme="light"] {
+  --bg: #f4f6f9;
+  --panel: #ffffff;
+  --panel-2: #eef2f7;
+  --border: #d7dee8;
+  --text: #16202b;      /* dark text on light */
+  --muted: #5b6b7d;
+  --accent: #0f766e;
+  --danger: #dc2626;
+  --btn-bg: #0f766e;    /* dark teal */
+  --btn-text: #ffffff;  /* white reads well on dark teal */
+  --btn-bg-hover: #115e59;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Tahoma, Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+a { color: var(--accent); text-decoration: none; cursor: pointer; }
+code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; unicode-bidi: plaintext; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+
+/* --- form controls --- */
+input[type="text"], input[type="password"], input:not([type]), select {
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 10px 12px; font-size: 14px; outline: none; font-family: inherit;
+}
+input:focus, select:focus { border-color: var(--accent); }
+
+button {
+  background: var(--btn-bg); color: var(--btn-text); border: 0; border-radius: 8px;
+  padding: 10px 14px; font-weight: 600; cursor: pointer; font-size: 14px; font-family: inherit;
+}
+button:hover { background: var(--btn-bg-hover); }
+button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); font-weight: 500; }
+button.ghost:hover { border-color: var(--accent); color: var(--accent); }
+button.link { background: none; color: var(--danger); padding: 4px 8px; font-weight: 500; }
+
+.error { color: var(--danger); font-size: 13px; }
+
+label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+
+/* --- login --- */
+.login-body { display: flex; min-height: 100vh; align-items: center; justify-content: center; }
+.login-card {
+  width: 320px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 28px; display: flex; flex-direction: column; gap: 12px;
+}
+.brand-lg { font-size: 30px; font-weight: 700; text-align: center; color: var(--accent); }
+.subtitle { text-align: center; color: var(--muted); margin-bottom: 8px; }
+
+/* --- layout --- */
+.layout { display: flex; min-height: 100vh; }
+.sidebar {
+  width: 210px; background: var(--panel); border-inline-end: 1px solid var(--border);
+  display: flex; flex-direction: column; padding: 18px 14px; gap: 6px;
+}
+.brand { font-size: 22px; font-weight: 700; color: var(--accent); margin-bottom: 18px; }
+.brand span { font-size: 13px; color: var(--muted); font-weight: 500; }
+.sidebar nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.sidebar nav a { padding: 10px 12px; border-radius: 8px; color: var(--text); }
+.sidebar nav a:hover { background: var(--panel-2); }
+.sidebar nav a.active { background: var(--panel-2); color: var(--accent); font-weight: 600; }
+
+.controls { display: flex; gap: 8px; margin-bottom: 8px; }
+.controls .select, .controls button { flex: 1; padding: 8px 10px; font-size: 13px; }
+
+.content { flex: 1; padding: 22px 28px; overflow: auto; }
+.topbar { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; gap: 12px; }
+.topbar h1 { font-size: 20px; margin: 0; }
+
+/* --- cards --- */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.card .v { font-size: 22px; font-weight: 700; margin-top: 6px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+.badge.on { background: rgba(45, 212, 191, .18); color: var(--accent); }
+.badge.off { background: rgba(248, 113, 113, .16); color: var(--danger); }
+
+/* --- tables & forms --- */
+.row { display: flex; gap: 10px; margin-bottom: 16px; }
+.row input { flex: 1; }
+.grid { width: 100%; border-collapse: collapse; }
+.grid th, .grid td { text-align: start; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.grid th { color: var(--muted); font-weight: 600; font-size: 12px; }
+.grid td .mono { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); word-break: break-all; unicode-bidi: plaintext; }
+
+.settings { display: flex; flex-direction: column; gap: 14px; max-width: 560px; }
+.switch { flex-direction: row; align-items: center; gap: 10px; color: var(--text); }
+.switch em { color: var(--muted); font-style: normal; font-size: 12px; }
+.settings button { align-self: flex-start; }

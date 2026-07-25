@@ -1,0 +1,36 @@
+# Production Docker deployment: Caddy (automatic HTTPS) in front of the published
+# bumshid image. Usage:
+#   cp ../../.env.example .env      # then edit; set BUMSHI_DOMAIN + admin vars
+#   BUMSHI_DOMAIN=proxy.example.com docker compose up -d
+#
+# The image tag is pinned via BUMSHI_VERSION (defaults to latest).
+
+services:
+  bumshid:
+    image: ghcr.io/bumshi/bumshi/bumshid:${BUMSHI_VERSION:-latest}
+    env_file: .env
+    environment:
+      BUMSHI_LISTEN_ADDR: 0.0.0.0:8080
+      BUMSHI_METRICS_ADDR: 127.0.0.1:9090
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8-alpine
+    depends_on:
+      - bumshid
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      BUMSHI_DOMAIN: ${BUMSHI_DOMAIN:?set BUMSHI_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

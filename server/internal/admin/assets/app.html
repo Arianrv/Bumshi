@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bumshi · Admin</title>
+  <script>
+    // Apply persisted theme + language before paint to avoid a flash.
+    (function () {
+      try {
+        var e = document.documentElement;
+        var t = localStorage.getItem("bumshi_theme");
+        var l = localStorage.getItem("bumshi_lang");
+        e.dataset.theme = t === "light" ? "light" : "dark";
+        e.lang = l === "fa" ? "fa" : "en";
+        e.dir = l === "fa" ? "rtl" : "ltr";
+      } catch (_) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="__BASE__assets/style.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">بامشی <span>Bumshi</span></div>
+      <nav id="nav">
+        <a data-view="dashboard" class="active" data-i18n="nav_dashboard">Dashboard</a>
+        <a data-view="access" data-i18n="nav_access">Access users</a>
+        <a data-view="settings" data-i18n="nav_settings">Settings</a>
+      </nav>
+      <div class="controls">
+        <button id="theme-toggle" class="ghost" type="button">Light</button>
+        <select id="lang-select" class="select" aria-label="Language"></select>
+      </div>
+      <button id="logout" class="ghost" data-i18n="logout">Log out</button>
+    </aside>
+
+    <main class="content">
+      <header class="topbar">
+        <h1 id="title" data-i18n="nav_dashboard">Dashboard</h1>
+        <span id="build" class="muted"></span>
+      </header>
+
+      <section id="view-dashboard" class="view">
+        <div class="cards" id="cards"></div>
+      </section>
+
+      <section id="view-access" class="view" hidden>
+        <div class="row">
+          <input id="new-label" data-i18n-ph="access_label_ph" placeholder="Label (e.g. phone, laptop)" />
+          <button id="add-user" data-i18n="add_access_user">Add access user</button>
+        </div>
+        <table class="grid">
+          <thead>
+            <tr>
+              <th data-i18n="th_label">Label</th>
+              <th data-i18n="th_token">Token</th>
+              <th data-i18n="th_link">Connection link</th>
+              <th data-i18n="th_action"></th>
+            </tr>
+          </thead>
+          <tbody id="users"></tbody>
+        </table>
+        <p class="muted small" data-i18n="access_help">Share the connection link with a person you trust.</p>
+      </section>
+
+      <section id="view-settings" class="view" hidden>
+        <div class="settings">
+          <label class="switch"><input type="checkbox" id="s-proxy" /> <span data-i18n="settings_proxy">Web proxy engine</span></label>
+          <label class="switch"><input type="checkbox" id="s-access-log" /> <span data-i18n="settings_access_log">Access logging</span> <em data-i18n="settings_access_log_note"></em></label>
+          <label class="switch"><input type="checkbox" id="s-youtube" disabled /> <span data-i18n="settings_youtube">YouTube module</span> <em data-i18n="coming_soon"></em></label>
+          <label class="switch"><input type="checkbox" id="s-telegram" disabled /> <span data-i18n="settings_telegram">Telegram module</span> <em data-i18n="coming_soon"></em></label>
+          <button id="save-settings" data-i18n="save_settings">Save settings</button>
+          <div id="settings-msg" class="muted small"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="__BASE__assets/theme.js"></script>
+  <script src="__BASE__assets/i18n.js"></script>
+  <script src="__BASE__assets/app.js"></script>
+</body>
+</html>

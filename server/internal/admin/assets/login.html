@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bumshi · Sign in</title>
+  <script>
+    (function () {
+      try {
+        var e = document.documentElement;
+        var th = localStorage.getItem("bumshi_theme");
+        var l = localStorage.getItem("bumshi_lang");
+        e.dataset.theme = th === "light" ? "light" : "dark";
+        e.lang = l === "fa" ? "fa" : "en";
+        e.dir = l === "fa" ? "rtl" : "ltr";
+      } catch (_) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="__BASE__assets/style.css" />
+</head>
+<body class="login-body">
+  <form id="login" class="login-card" autocomplete="on">
+    <div class="brand-lg">بامشی</div>
+    <div class="subtitle" data-i18n="login_subtitle">Bumshi admin</div>
+    <label><span data-i18n="username">Username</span>
+      <input name="username" autocomplete="username" required autofocus />
+    </label>
+    <label><span data-i18n="password">Password</span>
+      <input name="password" type="password" autocomplete="current-password" required />
+    </label>
+    <button type="submit" data-i18n="sign_in">Sign in</button>
+    <div id="err" class="error" hidden></div>
+    <div class="controls">
+      <button id="theme-toggle" class="ghost" type="button">Light</button>
+      <select id="lang-select" class="select" aria-label="Language"></select>
+    </div>
+  </form>
+
+  <script src="__BASE__assets/theme.js"></script>
+  <script src="__BASE__assets/i18n.js"></script>
+  <script>
+    var BASE = "__BASE__";
+    var i18n = window.Bumshi.i18n, theme = window.Bumshi.theme, t = i18n.t;
+    var f = document.getElementById("login");
+    var err = document.getElementById("err");
+
+    f.addEventListener("submit", async function (e) {
+      e.preventDefault();
+      err.hidden = true;
+      try {
+        var r = await fetch(BASE + "login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: f.username.value, password: f.password.value }),
+        });
+        var d = await r.json();
+        if (r.ok && d.ok) { location.href = d.redirect || BASE; return; }
+        err.textContent = (d && d.error) || t("sign_in_failed");
+        err.hidden = false;
+      } catch (_) {
+        err.textContent = t("network_error");
+        err.hidden = false;
+      }
+    });
+
+    // theme + language controls
+    var sel = document.getElementById("lang-select");
+    i18n.langs.forEach(function (l) {
+      var o = document.createElement("option");
+      o.value = l.code; o.textContent = l.name; sel.appendChild(o);
+    });
+    sel.value = i18n.currentLang();
+    sel.addEventListener("change", function () { i18n.setLang(sel.value); });
+
+    var themeBtn = document.getElementById("theme-toggle");
+    function updateThemeBtn() { themeBtn.textContent = theme.get() === "dark" ? t("theme_light") : t("theme_dark"); }
+    themeBtn.addEventListener("click", function () { theme.toggle(); });
+    window.addEventListener("bumshi:themechange", updateThemeBtn);
+    window.addEventListener("bumshi:langchange", function () { sel.value = i18n.currentLang(); updateThemeBtn(); });
+
+    i18n.apply(document);
+    updateThemeBtn();
+  </script>
+</body>
+</html>

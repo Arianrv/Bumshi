@@ -1,0 +1,41 @@
+[Unit]
+Description=Bumshi control-plane (bumshid)
+Documentation=https://github.com/bumshi/bumshi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bumshi
+Group=bumshi
+EnvironmentFile=/etc/bumshi/bumshi.env
+ExecStart=/usr/local/bin/bumshid
+Restart=on-failure
+RestartSec=2
+
+# --- Hardening (aligns with the RAM-only privacy model, DESIGN §8.4) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# RAM-only: the service writes nothing to disk.
+ReadWritePaths=
+
+[Install]
+WantedBy=multi-user.target

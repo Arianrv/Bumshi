@@ -1,0 +1,38 @@
+# Development stack: Caddy (edge) in front of the bumshid control plane.
+# For local development only. Production deployment uses the installer and a
+# domain-based Caddyfile (later milestone).
+
+services:
+  bumshid:
+    build:
+      context: ./server
+      args:
+        VERSION: dev
+    environment:
+      BUMSHI_ENV: development
+      # Bind to all interfaces inside the container so Caddy can reach it.
+      BUMSHI_LISTEN_ADDR: 0.0.0.0:8080
+      BUMSHI_METRICS_ADDR: 127.0.0.1:9090
+      BUMSHI_ACCESS_LOG: "true"
+      BUMSHI_PROXY_ENABLED: "true"
+      BUMSHI_ADMIN_ENABLED: "true"
+      BUMSHI_PUBLIC_URL: "http://localhost:8080"
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - bumshid
+    ports:
+      - "8080:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

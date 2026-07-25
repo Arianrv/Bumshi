@@ -1,0 +1,11 @@
+{
+  "name": "bumshi-webengine",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Bumshi client runtime (service worker + client hooks).",
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "GPL-3.0-or-later"
+}

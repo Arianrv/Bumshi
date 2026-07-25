@@ -1,0 +1,28 @@
+# Build artifacts
+/bin/
+/dist/
+*.exe
+bumshid
+
+# Go
+server/vendor/
+*.test
+*.out
+coverage.*
+
+# Environment / secrets — never commit
+.env
+*.local
+*.pem
+*.key
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Node / client (engine, app — later milestones)
+node_modules/
+dist-ssr/

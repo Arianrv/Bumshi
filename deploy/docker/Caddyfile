@@ -1,0 +1,9 @@
+# Production edge for the Docker deployment. The domain comes from the
+# BUMSHI_DOMAIN environment variable; Caddy obtains and renews a Let's Encrypt
+# certificate automatically and enables HTTPS + HSTS.
+
+{$BUMSHI_DOMAIN} {
+	encode gzip
+	header -Server
+	reverse_proxy bumshid:8080
+}

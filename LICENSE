@@ -1,0 +1,27 @@
+Bumshi — Self-Hosted, Censorship-Resistant Web Proxy & Browser
+Copyright (C) 2026  The Bumshi Authors
+
+SPDX-License-Identifier: GPL-3.0-or-later
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program.  If not, see <https://www.gnu.org/licenses/>.
+
+===============================================================================
+ACTION REQUIRED BEFORE PUBLISHING
+===============================================================================
+This file must contain the FULL text of the GNU General Public License,
+version 3. It could not be downloaded automatically in the build sandbox
+(outbound network to gnu.org was blocked). Before making the repository public,
+replace everything below this line with the canonical text from:
+
+    https://www.gnu.org/licenses/gpl-3.0.txt
+===============================================================================

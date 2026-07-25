@@ -1,0 +1,28 @@
+# Bumshi edge configuration.
+#
+# PRODUCTION: replace the `:80` site address below with your domain, e.g.
+#
+#     proxy.example.com {
+#         reverse_proxy 127.0.0.1:8080
+#     }
+#
+# Caddy will then obtain and auto-renew a Let's Encrypt certificate and enable
+# HTTPS + HSTS automatically. The control plane (bumshid) stays bound to
+# localhost; only Caddy is exposed publicly.
+#
+# DEVELOPMENT (docker-compose): serves plain HTTP on :80 in front of bumshid.
+
+{
+	admin off
+}
+
+:80 {
+	encode gzip
+
+	# Strip the upstream server identity.
+	header -Server
+
+	# Health, readiness, version, and (later) the proxy modules are all served
+	# by the bumshid control plane.
+	reverse_proxy bumshid:8080
+}
