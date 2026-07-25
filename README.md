@@ -15,8 +15,9 @@ operator can see plaintext, so it is not an open public service.
 > client hooks) — **Step 3 (auth + admin panel + management CLI)**, and
 > **Step 4 (installer + release/packaging automation)**. All server features are
 > off by default. A companion **browser app** (Tauri v2, Windows first) is
-> distributed as prebuilt downloads, not source. Still to come: the
-> YouTube/Telegram modules.
+> distributed as prebuilt downloads, not source. **Site modules** (YouTube via
+> Invidious, Telegram via the engine) are covered in [`MODULES.md`](MODULES.md).
+> Remaining: Step 7 — privacy hardening + launch.
 
 ## Install (self-host)
 
