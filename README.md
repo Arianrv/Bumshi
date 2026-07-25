@@ -13,8 +13,10 @@ operator can see plaintext, so it is not an open public service.
 > **Step 2 (the web-proxy engine)** — SSRF-safe streaming HTTP + WebSocket core,
 > server-side HTML/CSS rewriting, and the browser runtime (service worker +
 > client hooks) — **Step 3 (auth + admin panel + management CLI)**, and
-> **Step 4 (installer + release/packaging automation)**. All features are off by
-> default. Still to come: the YouTube/Telegram modules and the browser app.
+> **Step 4 (installer + release/packaging automation)**. All server features are
+> off by default. A companion **browser app** (Tauri v2, Windows first) is
+> distributed as prebuilt downloads, not source. Still to come: the
+> YouTube/Telegram modules.
 
 ## Install (self-host)
 
@@ -53,8 +55,8 @@ bumshi/
 └── .github/workflows/   # CI (build, test, lint, govulncheck, docker)
 ```
 
-Later milestones add `engine/` (proxy engine), `modules/` (generic, YouTube,
-Telegram), `app/` (the browser client), and `deploy/` (installer, systemd).
+Later milestones add `modules/` (YouTube, Telegram). The companion browser app is
+built and distributed as prebuilt binaries, not kept in this repo.
 
 ## The control-plane service (`bumshid`)
 

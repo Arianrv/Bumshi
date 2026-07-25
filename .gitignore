@@ -30,5 +30,8 @@ dist-ssr/
 # Private design/planning doc — kept local, not shipped in the public repo
 DESIGN.md
 
+# Companion browser app — kept private; distributed as prebuilt binaries only
+/app/
+
 # Sandbox FUSE artifacts (never real files on your machine)
 .fuse_hidden*
