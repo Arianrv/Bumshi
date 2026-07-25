@@ -38,7 +38,7 @@ type Config struct {
 
 	// AccessLog controls per-request access logging.
 	//
-	// Privacy policy (see DESIGN §8.4): user-traffic logging is OFF by default
+	// Privacy policy: user-traffic logging is OFF by default
 	// and must remain off in public releases. It exists only as a development
 	// aid and is gated behind this single flag.
 	AccessLog bool

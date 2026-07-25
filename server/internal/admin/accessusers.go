@@ -17,7 +17,7 @@ type AccessUser struct {
 	Created time.Time `json:"created"`
 }
 
-// AccessStore is an in-memory store of access users (RAM-only; see DESIGN §8.4).
+// AccessStore is an in-memory store of access users (RAM-only).
 type AccessStore struct {
 	mu    sync.RWMutex
 	users map[string]AccessUser

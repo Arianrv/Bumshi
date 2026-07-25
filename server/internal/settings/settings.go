@@ -1,6 +1,6 @@
 // Package settings holds live, mutable runtime settings that the admin panel can
 // change without a restart. It is seeded from static configuration at startup.
-// RAM-only: changes do not persist across restarts (see DESIGN §8.4).
+// RAM-only: changes do not persist across restarts.
 package settings
 
 import "sync"

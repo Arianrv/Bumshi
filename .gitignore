@@ -26,3 +26,9 @@ Thumbs.db
 # Node / client (engine, app — later milestones)
 node_modules/
 dist-ssr/
+
+# Private design/planning doc — kept local, not shipped in the public repo
+DESIGN.md
+
+# Sandbox FUSE artifacts (never real files on your machine)
+.fuse_hidden*

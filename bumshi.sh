@@ -7,7 +7,7 @@ SERVICE="bumshi"
 BINARY="/usr/local/bin/bumshid"
 ENV_FILE="/etc/bumshi/bumshi.env"
 CADDYFILE="/etc/caddy/Caddyfile"
-REPO="${BUMSHI_REPO:-bumshi/bumshi}"
+REPO="${BUMSHI_REPO:-Arianrv/Bumshi}"
 REF="${BUMSHI_REF:-main}"
 
 c_reset="\033[0m"; c_teal="\033[36m"; c_red="\033[31m"; c_dim="\033[2m"

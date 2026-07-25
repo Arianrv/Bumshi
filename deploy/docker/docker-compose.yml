@@ -7,7 +7,7 @@
 
 services:
   bumshid:
-    image: ghcr.io/bumshi/bumshi/bumshid:${BUMSHI_VERSION:-latest}
+    image: ghcr.io/arianrv/bumshi/bumshid:${BUMSHI_VERSION:-latest}
     env_file: .env
     environment:
       BUMSHI_LISTEN_ADDR: 0.0.0.0:8080

@@ -2,8 +2,8 @@
 # Bumshi installer.
 #
 # Recommended (process substitution keeps prompts interactive):
-#   bash <(curl -Ls https://raw.githubusercontent.com/bumshi/bumshi/main/install.sh)
-#   bash <(wget -qO- https://raw.githubusercontent.com/bumshi/bumshi/main/install.sh)
+#   bash <(curl -Ls https://raw.githubusercontent.com/Arianrv/Bumshi/main/install.sh)
+#   bash <(wget -qO- https://raw.githubusercontent.com/Arianrv/Bumshi/main/install.sh)
 #
 # Non-interactive (CI/automation): set BUMSHI_* variables and pipe, e.g.
 #   BUMSHI_DOMAIN=proxy.example.com BUMSHI_ADMIN_PASSWORD=... curl -Ls URL | bash
@@ -14,7 +14,7 @@
 # unless you choose to reconfigure.
 set -euo pipefail
 
-REPO="${BUMSHI_REPO:-bumshi/bumshi}"
+REPO="${BUMSHI_REPO:-Arianrv/Bumshi}"
 REF="${BUMSHI_REF:-main}"          # branch/tag for helper files (unit, mgmt script)
 VERSION="${BUMSHI_VERSION:-latest}" # release tag for the binary, or "latest"
 

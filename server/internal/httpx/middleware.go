@@ -134,8 +134,8 @@ func Metrics(c *metrics.HTTPCollectors) Middleware {
 }
 
 // AccessLog logs one structured line per request when enabled() reports true.
-// It is DISABLED by default and must remain disabled in public releases (see
-// DESIGN §8.4): it is a development aid. The enabled func is consulted per
+// It is DISABLED by default and must remain disabled in public releases: it is
+// a development aid. The enabled func is consulted per
 // request so the admin panel can toggle it live. Even when enabled it logs only
 // coarse operational fields (method, path, status, size, duration) and never
 // bodies or headers. A nil enabled func means "never log".

@@ -24,4 +24,4 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with checksums and build-provenance attestation, plus a multi-arch container
   image on GHCR; production Docker Compose + Caddyfile.
 
-[Unreleased]: https://github.com/bumshi/bumshi/commits/main
+[Unreleased]: https://github.com/Arianrv/Bumshi/commits/main

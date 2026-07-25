@@ -1,7 +1,7 @@
 // Package admin implements the server-side admin panel: authentication (session
 // cookies + CSRF), a small JSON API, and an embedded dark UI modeled on the
-// 3x-ui layout. It is deployer-only and served under a configurable base path
-// (see DESIGN §5.1). It is never part of the client app.
+// 3x-ui layout. It is deployer-only and served under a configurable base path.
+// It is never part of the client app.
 package admin
 
 import (

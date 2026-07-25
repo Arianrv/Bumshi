@@ -5,9 +5,8 @@ small service on **your own VPS**; it fetches filtered sites server-side and
 serves them to a companion browser app over **ordinary HTTPS** — no VPN, no
 tunnel, nothing for DPI to fingerprint.
 
-The full design, threat model, and rationale live in [`DESIGN.md`](DESIGN.md).
 Bumshi is intended for **self-hosting or trusted-friend hosting only** — the
-operator can see plaintext (see DESIGN §8.4). It is not an open public service.
+operator can see plaintext, so it is not an open public service.
 
 > Status: early development. This repository currently contains **Step 0
 > (foundations)**, **Step 1 (the control-plane service, `bumshid`)**,
@@ -24,9 +23,9 @@ binary, a hardened systemd service, the management command, and optionally Caddy
 for automatic HTTPS. Process substitution keeps the prompts interactive:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/bumshi/bumshi/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/Arianrv/Bumshi/main/install.sh)
 # or, without curl:
-bash <(wget -qO- https://raw.githubusercontent.com/bumshi/bumshi/main/install.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/Arianrv/Bumshi/main/install.sh)
 ```
 
 It prompts for a domain, admin credentials (auto-generated if blank), and the
@@ -36,7 +35,7 @@ the binary and keeps your config. Manage the service with `bumshi menu`, and
 remove it with `uninstall.sh`.
 
 **Docker:** a pinned, multi-arch image is published to
-`ghcr.io/bumshi/bumshi/bumshid`. See `deploy/docker/` for a production
+`ghcr.io/arianrv/bumshi/bumshid`. See `deploy/docker/` for a production
 Compose file + Caddyfile.
 
 
@@ -51,8 +50,7 @@ bumshi/
 ├── Caddyfile            # TLS/edge configuration
 ├── docker-compose.yml   # local development stack (Caddy + bumshid)
 ├── Makefile             # developer tasks
-├── .github/workflows/   # CI (build, test, lint, govulncheck, docker)
-└── DESIGN.md            # architecture & decisions
+└── .github/workflows/   # CI (build, test, lint, govulncheck, docker)
 ```
 
 Later milestones add `engine/` (proxy engine), `modules/` (generic, YouTube,
@@ -102,7 +100,7 @@ management (create/delete end-user credentials and copy their `bumshi://`
 connection links). Security: PBKDF2-HMAC-SHA256 password hashing, in-memory
 sessions with `HttpOnly`/`Secure`/`SameSite=Strict` cookies, CSRF double-submit
 tokens on mutations, and login rate limiting. It is **not** part of the client
-app (see DESIGN §5.1). Set the password with:
+app. Set the password with:
 
 ```bash
 bumshid hash-password        # prints a hash for BUMSHI_ADMIN_PASSWORD_HASH
@@ -120,7 +118,7 @@ Design properties baked in from the start:
   graceful shutdown, panic recovery, request IDs, security headers.
 - **Privacy-first logging** — per-request access logging is **off by default**
   and gated behind `BUMSHI_ACCESS_LOG`; it is a development aid only and must
-  stay off in public releases (DESIGN §8.4).
+  stay off in public releases.
 - **Localhost-bound by default** — the control plane and metrics listeners bind
   to `127.0.0.1`; only Caddy faces the internet.
 
