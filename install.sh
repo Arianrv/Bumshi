@@ -59,7 +59,7 @@ detect_arch() {
   esac
 }
 
-gen_password() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16; }
+gen_password() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 16 || true; }
 
 prompt() { # prompt VAR "question" "default"
   local __var="$1" q="$2" def="${3:-}" ans
