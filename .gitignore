@@ -2,7 +2,9 @@
 /bin/
 /dist/
 *.exe
-bumshid
+# Compiled server binary only — anchored so it does NOT match the source
+# directory server/cmd/bumshid (an unanchored "bumshid" rule hid main.go).
+/server/bumshid
 
 # Go
 server/vendor/
