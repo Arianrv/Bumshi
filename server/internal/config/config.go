@@ -58,6 +58,10 @@ type Config struct {
 	// ProxyResponseHeaderTimeout bounds how long the proxy waits for an
 	// upstream's response headers (the body may then stream indefinitely).
 	ProxyResponseHeaderTimeout time.Duration
+	// ProxyForceIPv4 makes the proxy's upstream fetcher and WebSocket tunnel
+	// dial over IPv4 only. IPv6 egress is unreliable on some networks (notably
+	// from Iran), so this defaults to true; set to false for dual-stack.
+	ProxyForceIPv4 bool
 
 	// AdminEnabled mounts the deployer-only admin panel.
 	AdminEnabled bool
@@ -92,6 +96,7 @@ func Load() (Config, error) {
 		ProxyEnabled:               getBool("PROXY_ENABLED", false),
 		ProxyRewriteMaxBytes:       getInt64("PROXY_REWRITE_MAX_BYTES", 8<<20),
 		ProxyResponseHeaderTimeout: getDuration("PROXY_RESPONSE_HEADER_TIMEOUT", 30*time.Second),
+		ProxyForceIPv4:             getBool("PROXY_FORCE_IPV4", true),
 
 		AdminEnabled:      getBool("ADMIN_ENABLED", false),
 		AdminPath:         getString("ADMIN_PATH", "/admin/"),

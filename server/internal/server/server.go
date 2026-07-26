@@ -94,12 +94,13 @@ func buildProxy(cfg config.Config, logger *slog.Logger, reg *metrics.Registry, l
 		return nil, nil
 	}
 	proxyHandler = proxy.New(proxy.Options{
-		Client:          fetch.NewClient(cfg.ProxyResponseHeaderTimeout),
+		Client:          fetch.NewClient(cfg.ProxyResponseHeaderTimeout, cfg.ProxyForceIPv4),
 		Logger:          logger,
 		Collectors:      proxy.NewCollectors(reg),
 		RewriteMaxBytes: cfg.ProxyRewriteMaxBytes,
 		InjectHTML:      webengine.Inject,
 		Enabled:         live.ProxyEnabled,
+		ForceIPv4:       cfg.ProxyForceIPv4,
 	})
 	engineHandler = webengine.Handler()
 	return proxyHandler, engineHandler

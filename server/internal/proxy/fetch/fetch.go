@@ -3,6 +3,7 @@
 package fetch
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"time"
@@ -22,9 +23,19 @@ import (
 // responseHeaderTimeout bounds the wait for the upstream's response headers; the
 // body itself may then stream for as long as needed (so large downloads and
 // video are not cut off).
-func NewClient(responseHeaderTimeout time.Duration) *http.Client {
+//
+// When forceIPv4 is set, all upstream connections are dialed over IPv4 only;
+// IPv6 egress is unreliable on some networks (notably from Iran).
+func NewClient(responseHeaderTimeout time.Duration, forceIPv4 bool) *http.Client {
+	base := Dialer()
+	dialContext := base.DialContext
+	if forceIPv4 {
+		dialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return base.DialContext(ctx, forceIPv4Network(network), addr)
+		}
+	}
 	transport := &http.Transport{
-		DialContext:           Dialer().DialContext,
+		DialContext:           dialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   4,
@@ -49,4 +60,25 @@ func Dialer() *net.Dialer {
 		KeepAlive: 30 * time.Second,
 		Control:   ssrfguard.Control,
 	}
+}
+
+// DialNetwork returns the network to request from a net.Dialer: "tcp4" when
+// forceIPv4 is set (IPv6 egress is unreliable from some networks, e.g. Iran),
+// otherwise "tcp" for dual-stack. Callers that pass the network explicitly
+// (such as the WebSocket tunnel) use this to honour the same setting as the
+// HTTP client.
+func DialNetwork(forceIPv4 bool) string {
+	if forceIPv4 {
+		return "tcp4"
+	}
+	return "tcp"
+}
+
+// forceIPv4Network rewrites a dual-stack "tcp" network to IPv4-only "tcp4",
+// leaving an explicit "tcp4"/"tcp6" request unchanged.
+func forceIPv4Network(network string) string {
+	if network == "tcp" {
+		return "tcp4"
+	}
+	return network
 }

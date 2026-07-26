@@ -62,6 +62,10 @@ type Options struct {
 	// toggle it live. When it returns false, requests get 404. Nil means always
 	// enabled.
 	Enabled func() bool
+	// ForceIPv4 makes the WebSocket tunnel dial upstream over IPv4 only. It
+	// mirrors the fetch client's setting (see fetch.NewClient) so both transports
+	// behave consistently.
+	ForceIPv4 bool
 }
 
 // Handler is the proxy HTTP handler. Mount it under link.Prefix ("/p/").
@@ -72,6 +76,7 @@ type Handler struct {
 	rewriteMax int64
 	injectHTML func([]byte) []byte
 	enabled    func() bool
+	forceIPv4  bool
 }
 
 // New builds a Handler from opts.
@@ -91,6 +96,7 @@ func New(opts Options) *Handler {
 		rewriteMax: max,
 		injectHTML: opts.InjectHTML,
 		enabled:    opts.Enabled,
+		forceIPv4:  opts.ForceIPv4,
 	}
 }
 

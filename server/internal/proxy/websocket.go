@@ -104,15 +104,16 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, target 
 
 func (h *Handler) dialUpstream(ctx context.Context, target *url.URL) (net.Conn, error) {
 	dialer := fetch.Dialer()
+	network := fetch.DialNetwork(h.forceIPv4)
 	hostport := canonicalHostPort(target)
 	if target.Scheme == "https" {
 		td := &tls.Dialer{
 			NetDialer: dialer,
 			Config:    &tls.Config{ServerName: target.Hostname(), MinVersion: tls.VersionTLS12},
 		}
-		return td.DialContext(ctx, "tcp", hostport)
+		return td.DialContext(ctx, network, hostport)
 	}
-	return dialer.DialContext(ctx, "tcp", hostport)
+	return dialer.DialContext(ctx, network, hostport)
 }
 
 func (h *Handler) upstreamHandshake(upstream net.Conn, target *url.URL, r *http.Request) (*http.Response, *bufio.Reader, error) {
