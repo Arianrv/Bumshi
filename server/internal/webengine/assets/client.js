@@ -22,15 +22,21 @@
     if (url == null || B.isNonNav(String(url))) {
       return url;
     }
+    var raw = String(url);
+    // Already-proxied references must never be wrapped again, or they nest into
+    // "/p/<enc(/p/<enc(...)>)>" loops. The server injects ROOT-RELATIVE proxy
+    // links (e.g. "/p/<token>"); those belong to the proxy origin and must NOT
+    // be resolved against realBase() (the real site), so short-circuit on the
+    // raw prefix before resolving.
+    if (raw.indexOf(B.PREFIX) === 0 || raw.indexOf(B.ENGINE) === 0) {
+      return url;
+    }
     try {
-      var abs = new URL(String(url), realBase());
+      var abs = new URL(raw, realBase());
       if (abs.protocol !== "http:" && abs.protocol !== "https:") {
         return url;
       }
-      // Already a proxied link. The server rewrites references to absolute
-      // "https://<proxy>/p/<token>" URLs; re-encoding those would build nested
-      // "/p/<enc(/p/<enc(...)>)>" loops that recurse into the proxy. Leave any
-      // URL already on our origin under /p/ or /__bumshi__/ untouched.
+      // Absolute proxy URLs already on our own origin: leave untouched too.
       if (
         abs.origin === origin &&
         (abs.pathname.indexOf(B.PREFIX) === 0 || abs.pathname.indexOf(B.ENGINE) === 0)

@@ -52,7 +52,10 @@ func Handler() http.Handler {
 		}
 		h := w.Header()
 		h.Set("Content-Type", "text/javascript; charset=utf-8")
-		h.Set("Cache-Control", "public, max-age=3600")
+		// Revalidate on every load (ServeContent answers with 304 when unchanged)
+		// so a redeployed runtime takes effect immediately, without users having
+		// to clear cached assets or an old service worker.
+		h.Set("Cache-Control", "no-cache")
 		if name == "sw.js" {
 			// Allow a worker hosted under /__bumshi__/ to control scope "/".
 			h.Set("Service-Worker-Allowed", "/")
