@@ -3,7 +3,7 @@
 # ---- build stage ----
 # Runs on the builder's native platform and cross-compiles to the target, so
 # multi-arch images build fast (no QEMU emulation of the Go toolchain).
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 WORKDIR /src
 
 # Module graph first for better layer caching. The project is currently
