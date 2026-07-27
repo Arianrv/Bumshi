@@ -27,6 +27,16 @@
       if (abs.protocol !== "http:" && abs.protocol !== "https:") {
         return url;
       }
+      // Already a proxied link. The server rewrites references to absolute
+      // "https://<proxy>/p/<token>" URLs; re-encoding those would build nested
+      // "/p/<enc(/p/<enc(...)>)>" loops that recurse into the proxy. Leave any
+      // URL already on our origin under /p/ or /__bumshi__/ untouched.
+      if (
+        abs.origin === origin &&
+        (abs.pathname.indexOf(B.PREFIX) === 0 || abs.pathname.indexOf(B.ENGINE) === 0)
+      ) {
+        return url;
+      }
       return origin + B.encodeAbsolute(abs.href);
     } catch (e) {
       return url;

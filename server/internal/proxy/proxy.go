@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -113,11 +114,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid proxy target", http.StatusBadRequest)
 		return
 	}
+	// Refuse to proxy our own origin. A decoded target pointing back at this
+	// host is a nested "/p/<enc(/p/...)>" self-reference (e.g. a client that
+	// double-wrapped an already-proxied link); fetching it would recurse into
+	// the proxy and spin until the context is canceled.
+	if sameHost(target.Hostname(), r.Host) {
+		h.count("bad_request")
+		http.Error(w, "refusing to proxy this proxy", http.StatusBadRequest)
+		return
+	}
 	if isWebSocketUpgrade(r) {
 		h.serveWebSocket(w, r, target)
 		return
 	}
 	h.serveHTTP(w, r, target)
+}
+
+// sameHost reports whether targetHost is the same host the request arrived on
+// (ignoring any port on the request's Host header), case-insensitively.
+func sameHost(targetHost, reqHost string) bool {
+	if h, _, err := net.SplitHostPort(reqHost); err == nil {
+		reqHost = h
+	}
+	return targetHost != "" && strings.EqualFold(targetHost, reqHost)
 }
 
 func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.URL) {
