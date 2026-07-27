@@ -224,6 +224,23 @@ EOF
   ok "wrote ${ENV_FILE}"
 }
 
+# open_firewall — allow 80/443 through a local firewall (ufw or firewalld) so
+# Cloudflare/clients can reach Caddy. No-op if neither is active. (A cloud
+# provider firewall, e.g. Hetzner Cloud, must still be opened in its console.)
+open_firewall() {
+  if have ufw && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+    ufw allow 80/tcp >/dev/null 2>&1 || true
+    ufw allow 443/tcp >/dev/null 2>&1 || true
+    ufw allow 443/udp >/dev/null 2>&1 || true
+    ok "opened ports 80 and 443 (ufw)"
+  elif have firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-service=http >/dev/null 2>&1 || true
+    firewall-cmd --permanent --add-service=https >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+    ok "opened ports 80 and 443 (firewalld)"
+  fi
+}
+
 install_caddy_pkg() {
   have apt-get || return 1
   info "installing Caddy"
@@ -241,10 +258,23 @@ emit_site_block() {
   echo "${domain} {"
   echo "	encode zstd gzip"
   echo "	header -Server"
-  if [ "$cert_mode" = "cf" ]; then echo "	tls ${cf_cert} ${cf_key}"; fi
+  case "$cert_mode" in
+    cfauto) printf '\ttls {\n\t\tdns cloudflare %s\n\t}\n' "$cf_token" ;;
+    cfcert) echo "	tls ${cf_cert} ${cf_key}" ;;
+  esac
   echo "	reverse_proxy 127.0.0.1:8080"
   echo "}"
   echo "$MARK_END"
+}
+
+# ensure_caddy_cf_plugin — makes sure the running Caddy has the Cloudflare DNS
+# provider (needed for automatic certificates via the DNS-01 challenge).
+ensure_caddy_cf_plugin() {
+  caddy list-modules 2>/dev/null | grep -q 'dns.providers.cloudflare' && return 0
+  info "adding the Cloudflare DNS plugin to Caddy (one-time)"
+  caddy add-package github.com/caddy-dns/cloudflare >/dev/null 2>&1 || return 1
+  systemctl restart caddy 2>/dev/null || true
+  caddy list-modules 2>/dev/null | grep -q 'dns.providers.cloudflare'
 }
 
 # setup_tls — wires HTTPS for $domain without ever clobbering an existing config.
@@ -256,13 +286,15 @@ setup_tls() {
     section "TLS" "How should ${domain} get its HTTPS certificate?"
     local m
     choose m "Certificate method" \
-      "Cloudflare Origin Certificate  (recommended when the domain is proxied through Cloudflare)" \
-      "Let's Encrypt  (automatic; requires the domain to point DIRECTLY at this server, no Cloudflare proxy)" \
-      "I'll handle TLS myself  (skip — just run bumshid on 127.0.0.1:8080)"
+      "Cloudflare (automatic)  — give an API token once; Caddy creates AND renews the cert. No files to paste." \
+      "Let's Encrypt (direct)  — only if the domain points straight at this server (no Cloudflare proxy)." \
+      "Cloudflare Origin Certificate  — paste PEM cert + key paths yourself." \
+      "Skip  — I'll reverse-proxy TLS to 127.0.0.1:8080 myself."
     case "$m" in
-      1) cert_mode="cf" ;;
+      1) cert_mode="cfauto" ;;
       2) cert_mode="le" ;;
-      3) cert_mode="skip" ;;
+      3) cert_mode="cfcert" ;;
+      4) cert_mode="skip" ;;
     esac
   fi
   if [ "$cert_mode" = "skip" ]; then
@@ -271,7 +303,17 @@ setup_tls() {
     return
   fi
 
-  if [ "$cert_mode" = "cf" ]; then
+  if [ "$cert_mode" = "cfauto" ]; then
+    behind_cf="y"
+    echo -e "${c_dim}Create the token: Cloudflare -> My Profile -> API Tokens -> Create Token ->"
+    echo -e "\"Edit zone DNS\" template, Zone Resources = your zone (e.g. $(echo "$domain" | rev | cut -d. -f1,2 | rev)).${c_reset}"
+    echo
+    while :; do
+      ask cf_token "Cloudflare API token" "solves the DNS challenge so Caddy can auto-issue the cert; stored in the root-only Caddyfile" "${cf_token:-}"
+      [ -n "$cf_token" ] && break
+      warn "a token is required for automatic certificates"
+    done
+  elif [ "$cert_mode" = "cfcert" ]; then
     behind_cf="y"
     local root; root="$(echo "$domain" | rev | cut -d. -f1,2 | rev)"
     echo -e "${c_dim}Create it in Cloudflare -> SSL/TLS -> Origin Server -> Create Certificate"
@@ -285,7 +327,7 @@ setup_tls() {
   elif [ "$cert_mode" = "le" ]; then
     behind_cf="n"
     if port_in_use 80; then
-      warn "port 80 is already in use on this host — Let's Encrypt's HTTP challenge may fail. If the domain is behind Cloudflare, use Origin Certificate instead."
+      warn "port 80 is already in use here — Let's Encrypt's HTTP challenge may fail. Behind Cloudflare, choose Cloudflare (automatic) instead."
     fi
     [ -n "$email" ] || email="admin@${domain}"
     while :; do
@@ -302,6 +344,13 @@ setup_tls() {
       warn "skipping Caddy; reverse-proxy your own TLS to 127.0.0.1:8080"; return
     fi
   fi
+
+  if [ "$cert_mode" = "cfauto" ] && ! ensure_caddy_cf_plugin; then
+    warn "could not add the Cloudflare DNS plugin automatically."
+    warn "run: caddy add-package github.com/caddy-dns/cloudflare && systemctl restart caddy — then: systemctl reload caddy"
+  fi
+
+  open_firewall
 
   mkdir -p "$(dirname "$CADDYFILE")"
   if [ -s "$CADDYFILE" ]; then
@@ -379,8 +428,10 @@ main() {
   behind_cf="n"
   gen_note=0
 
+  cf_token="${BUMSHI_CF_TOKEN:-}"
   case "${BUMSHI_TLS:-}" in
-    cloudflare | cf | origin) cert_mode="cf"; cf_cert="${BUMSHI_TLS_CERT:-}"; cf_key="${BUMSHI_TLS_KEY:-}" ;;
+    cloudflare | cf | cfauto | dns) cert_mode="cfauto" ;;
+    origin | cfcert) cert_mode="cfcert"; cf_cert="${BUMSHI_TLS_CERT:-}"; cf_key="${BUMSHI_TLS_KEY:-}" ;;
     letsencrypt | le | acme) cert_mode="le" ;;
     none | skip) cert_mode="skip" ;;
   esac
@@ -438,7 +489,7 @@ main() {
     admin_path="$(grep -E '^BUMSHI_ADMIN_PATH=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "$admin_path")"
     public_url="$(grep -E '^BUMSHI_PUBLIC_URL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "$public_url")"
     domain="$(normalize_domain "$public_url")"
-    [ -n "$domain" ] && cert_mode="cf"
+    [ -n "$domain" ] && cert_mode="keep" # non-skip so the summary shows the https URL
   fi
 
   systemctl enable --now bumshi
