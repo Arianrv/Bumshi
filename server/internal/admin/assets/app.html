@@ -47,14 +47,24 @@
 
       <section id="view-access" class="view" hidden>
         <div class="row">
-          <input id="new-label" data-i18n-ph="access_label_ph" placeholder="Label (e.g. phone, laptop)" />
+          <input id="new-label" data-i18n-ph="access_label_ph" placeholder="Name (e.g. Ali, customer-1)" />
+          <select id="new-expiry" class="select" aria-label="Expiry">
+            <option value="0" data-i18n="expiry_never">Never</option>
+            <option value="10" data-i18n="expiry_10d">10 days</option>
+            <option value="30" data-i18n="expiry_30d">30 days</option>
+            <option value="40" data-i18n="expiry_40d">40 days</option>
+            <option value="180" data-i18n="expiry_6m">6 months</option>
+            <option value="365" data-i18n="expiry_1y">1 year</option>
+          </select>
           <button id="add-user" data-i18n="add_access_user">Add access user</button>
         </div>
         <table class="grid">
           <thead>
             <tr>
-              <th data-i18n="th_label">Label</th>
-              <th data-i18n="th_token">Token</th>
+              <th data-i18n="th_label">Name</th>
+              <th data-i18n="th_created">Created</th>
+              <th data-i18n="th_expires">Expires</th>
+              <th data-i18n="th_status">Status</th>
               <th data-i18n="th_link">Connection link</th>
               <th data-i18n="th_action"></th>
             </tr>

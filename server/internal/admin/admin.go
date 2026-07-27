@@ -247,33 +247,50 @@ func (h *Handler) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 
 type userView struct {
 	AccessUser
-	Link string `json:"link"`
+	Link    string `json:"link"`
+	Expired bool   `json:"expired"`
+}
+
+func newUserView(u AccessUser, link string) userView {
+	return userView{AccessUser: u, Link: link, Expired: u.Expired()}
 }
 
 func (h *Handler) apiListUsers(w http.ResponseWriter, _ *http.Request) {
 	users := h.opts.Access.List()
 	out := make([]userView, 0, len(users))
 	for _, u := range users {
-		out = append(out, userView{AccessUser: u, Link: h.connectionLink(u)})
+		out = append(out, newUserView(u, h.connectionLink(u)))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (h *Handler) apiCreateUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Label string `json:"label"`
+		Label       string `json:"label"`
+		ExpiresDays int    `json:"expiresDays"` // 0 = never expires
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes)).Decode(&body)
 	label := strings.TrimSpace(body.Label)
 	if label == "" {
 		label = "user"
 	}
-	u, err := h.opts.Access.Create(label)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("internal error"))
-		return
+	var expires *time.Time
+	if body.ExpiresDays > 0 {
+		t := time.Now().UTC().Add(time.Duration(body.ExpiresDays) * 24 * time.Hour)
+		expires = &t
 	}
-	writeJSON(w, http.StatusOK, userView{AccessUser: u, Link: h.connectionLink(u)})
+	u, err := h.opts.Access.Create(label, expires)
+	if err != nil {
+		// An empty token means secure randomness failed (fatal); otherwise the
+		// user exists in memory but the roster couldn't be written to disk —
+		// usable now, just not persisted, so surface it in the logs and continue.
+		if u.Token == "" {
+			writeJSON(w, http.StatusInternalServerError, errBody("internal error"))
+			return
+		}
+		h.opts.Logger.Error("access user created but not persisted to disk", "error", err)
+	}
+	writeJSON(w, http.StatusOK, newUserView(u, h.connectionLink(u)))
 }
 
 func (h *Handler) apiDeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +301,9 @@ func (h *Handler) apiDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid request"))
 		return
 	}
-	h.opts.Access.Delete(body.ID)
+	if err := h.opts.Access.Delete(body.ID); err != nil {
+		h.opts.Logger.Error("access-user deletion not persisted to disk", "error", err)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

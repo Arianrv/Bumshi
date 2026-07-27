@@ -67,17 +67,25 @@ type Options struct {
 	// mirrors the fetch client's setting (see fetch.NewClient) so both transports
 	// behave consistently.
 	ForceIPv4 bool
+	// RequireToken gates every proxied request behind a valid, unexpired access
+	// token supplied as the bumshi_access cookie. Off unless explicitly enabled.
+	RequireToken bool
+	// Authorized validates an access token (see admin.AccessStore.Authorized).
+	// Only consulted when RequireToken is set.
+	Authorized func(token string) bool
 }
 
 // Handler is the proxy HTTP handler. Mount it under link.Prefix ("/p/").
 type Handler struct {
-	client     *http.Client
-	logger     *slog.Logger
-	col        *Collectors
-	rewriteMax int64
-	injectHTML func([]byte) []byte
-	enabled    func() bool
-	forceIPv4  bool
+	client       *http.Client
+	logger       *slog.Logger
+	col          *Collectors
+	rewriteMax   int64
+	injectHTML   func([]byte) []byte
+	enabled      func() bool
+	forceIPv4    bool
+	requireToken bool
+	authorized   func(string) bool
 }
 
 // New builds a Handler from opts.
@@ -91,13 +99,15 @@ func New(opts Options) *Handler {
 		logger = slog.Default()
 	}
 	return &Handler{
-		client:     opts.Client,
-		logger:     logger,
-		col:        opts.Collectors,
-		rewriteMax: max,
-		injectHTML: opts.InjectHTML,
-		enabled:    opts.Enabled,
-		forceIPv4:  opts.ForceIPv4,
+		client:       opts.Client,
+		logger:       logger,
+		col:          opts.Collectors,
+		rewriteMax:   max,
+		injectHTML:   opts.InjectHTML,
+		enabled:      opts.Enabled,
+		forceIPv4:    opts.ForceIPv4,
+		requireToken: opts.RequireToken,
+		authorized:   opts.Authorized,
 	}
 }
 
@@ -107,6 +117,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.enabled != nil && !h.enabled() {
 		http.NotFound(w, r)
 		return
+	}
+	// Access gating: when enabled, every proxied request must carry a valid,
+	// unexpired access token. The token is stripped before the upstream fetch so
+	// it never leaks to the target site.
+	if h.requireToken {
+		if h.authorized == nil || !h.authorized(accessToken(r)) {
+			h.count("unauthorized")
+			http.Error(w, "access denied", http.StatusForbidden)
+			return
+		}
+		stripAccessToken(r)
 	}
 	target, err := link.Decode(r.URL.EscapedPath())
 	if err != nil {
@@ -137,6 +158,30 @@ func sameHost(targetHost, reqHost string) bool {
 		reqHost = h
 	}
 	return targetHost != "" && strings.EqualFold(targetHost, reqHost)
+}
+
+// accessCookie is the cookie the client app sets to carry its access token.
+const accessCookie = "bumshi_access"
+
+// accessToken returns the access token from the request's bumshi_access cookie.
+func accessToken(r *http.Request) string {
+	if c, err := r.Cookie(accessCookie); err == nil {
+		return c.Value
+	}
+	return ""
+}
+
+// stripAccessToken removes the bumshi_access cookie from the request so the
+// access token is never forwarded to the upstream site.
+func stripAccessToken(r *http.Request) {
+	cookies := r.Cookies()
+	r.Header.Del("Cookie")
+	for _, c := range cookies {
+		if c.Name == accessCookie {
+			continue
+		}
+		r.AddCookie(c)
+	}
 }
 
 func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.URL) {

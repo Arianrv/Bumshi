@@ -118,3 +118,7 @@ label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color:
 .switch { flex-direction: row; align-items: center; gap: 10px; color: var(--text); }
 .switch em { color: var(--muted); font-style: normal; font-size: 12px; }
 .settings button { align-self: flex-start; }
+
+.badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.badge.ok { background: rgba(26, 158, 75, .16); color: #1a9e4b; }
+.badge.bad { background: rgba(217, 48, 37, .16); color: #e2645b; }

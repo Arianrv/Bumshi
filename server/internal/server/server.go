@@ -46,8 +46,18 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	hc := health.New()
 
 	live := settings.New(cfg.ProxyEnabled, cfg.AccessLog)
-	proxyHandler, engineHandler := buildProxy(cfg, logger, reg, live)
-	adminHandler := buildAdmin(cfg, logger, live)
+
+	// One shared access-user roster: the admin panel manages it, the proxy gates
+	// on it. It persists to disk so users survive restarts.
+	access, err := admin.NewAccessStore(cfg.AccessStorePath)
+	if err != nil {
+		logger.Error("could not load access-user roster; continuing in memory (fix the file and restart to re-enable persistence)",
+			"path", cfg.AccessStorePath, "error", err)
+		access, _ = admin.NewAccessStore("")
+	}
+
+	proxyHandler, engineHandler := buildProxy(cfg, logger, reg, live, access)
+	adminHandler := buildAdmin(cfg, logger, live, access)
 
 	mainHandler := httpx.Chain(
 		routes(hc, proxyHandler, engineHandler, adminHandler, cfg.AdminPath),
@@ -89,7 +99,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 // is built when the proxy is enabled now, or when the admin panel is enabled and
 // could turn it on at runtime; otherwise it returns (nil, nil) so the router
 // leaves /p/ and /__bumshi__/ unmounted.
-func buildProxy(cfg config.Config, logger *slog.Logger, reg *metrics.Registry, live *settings.Settings) (proxyHandler, engineHandler http.Handler) {
+func buildProxy(cfg config.Config, logger *slog.Logger, reg *metrics.Registry, live *settings.Settings, access *admin.AccessStore) (proxyHandler, engineHandler http.Handler) {
 	if !cfg.ProxyEnabled && !cfg.AdminEnabled {
 		return nil, nil
 	}
@@ -101,6 +111,8 @@ func buildProxy(cfg config.Config, logger *slog.Logger, reg *metrics.Registry, l
 		InjectHTML:      webengine.Inject,
 		Enabled:         live.ProxyEnabled,
 		ForceIPv4:       cfg.ProxyForceIPv4,
+		RequireToken:    cfg.ProxyRequireToken,
+		Authorized:      access.Authorized,
 	})
 	engineHandler = webengine.Handler()
 	return proxyHandler, engineHandler
@@ -109,7 +121,7 @@ func buildProxy(cfg config.Config, logger *slog.Logger, reg *metrics.Registry, l
 // buildAdmin constructs the admin panel handler when it is enabled, or returns
 // nil so the router leaves the admin path unmounted. When no password hash is
 // configured, a random password is generated and printed once to the logs.
-func buildAdmin(cfg config.Config, logger *slog.Logger, live *settings.Settings) http.Handler {
+func buildAdmin(cfg config.Config, logger *slog.Logger, live *settings.Settings, access *admin.AccessStore) http.Handler {
 	if !cfg.AdminEnabled {
 		return nil
 	}
@@ -133,7 +145,7 @@ func buildAdmin(cfg config.Config, logger *slog.Logger, live *settings.Settings)
 		Settings:     live,
 		Sessions:     auth.NewSessionStore(admin.AdminSessionTTL),
 		Logins:       auth.NewRateLimiter(10, time.Minute),
-		Access:       admin.NewAccessStore(),
+		Access:       access,
 		Logger:       logger,
 		StartedAt:    time.Now(),
 	})

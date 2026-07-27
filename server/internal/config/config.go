@@ -62,6 +62,10 @@ type Config struct {
 	// dial over IPv4 only. IPv6 egress is unreliable on some networks (notably
 	// from Iran), so this defaults to true; set to false for dual-stack.
 	ProxyForceIPv4 bool
+	// ProxyRequireToken gates the web proxy behind a valid, unexpired access
+	// token (sent by the app as the bumshi_access cookie). Off by default so
+	// existing installs keep working until the updated client is deployed.
+	ProxyRequireToken bool
 
 	// AdminEnabled mounts the deployer-only admin panel.
 	AdminEnabled bool
@@ -75,6 +79,9 @@ type Config struct {
 	AdminPasswordHash string
 	// PublicURL is the base URL end users connect to (used in connection links).
 	PublicURL string
+	// AccessStorePath is the JSON file the access-user roster persists to, so
+	// users survive restarts. Empty disables persistence (RAM-only).
+	AccessStorePath string
 }
 
 // Load reads configuration from the environment, applies defaults, and
@@ -97,12 +104,14 @@ func Load() (Config, error) {
 		ProxyRewriteMaxBytes:       getInt64("PROXY_REWRITE_MAX_BYTES", 8<<20),
 		ProxyResponseHeaderTimeout: getDuration("PROXY_RESPONSE_HEADER_TIMEOUT", 30*time.Second),
 		ProxyForceIPv4:             getBool("PROXY_FORCE_IPV4", true),
+		ProxyRequireToken:          getBool("PROXY_REQUIRE_TOKEN", false),
 
 		AdminEnabled:      getBool("ADMIN_ENABLED", false),
 		AdminPath:         getString("ADMIN_PATH", "/admin/"),
 		AdminUsername:     getString("ADMIN_USERNAME", "admin"),
 		AdminPasswordHash: getString("ADMIN_PASSWORD_HASH", ""),
 		PublicURL:         getString("PUBLIC_URL", ""),
+		AccessStorePath:   getString("ACCESS_STORE_PATH", "/var/lib/bumshi/access.json"),
 	}
 
 	cfg.AdminPath = normalizePath(cfg.AdminPath)

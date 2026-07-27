@@ -34,7 +34,11 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
-# RAM-only: the service writes nothing to disk.
+# Persist ONLY the access-user roster (survives restarts). Browsing is never
+# written to disk. StateDirectory creates /var/lib/bumshi owned by this service
+# and adds it to the writable set even under ProtectSystem=strict.
+StateDirectory=bumshi
+StateDirectoryMode=0700
 ReadWritePaths=
 
 [Install]

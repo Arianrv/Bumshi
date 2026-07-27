@@ -21,6 +21,10 @@ func testHandler(t *testing.T) *Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
+	access, err := NewAccessStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	return New(Options{
 		BasePath:     "/admin/",
 		Username:     "admin",
@@ -28,7 +32,7 @@ func testHandler(t *testing.T) *Handler {
 		Settings:     settings.New(false, false),
 		Sessions:     auth.NewSessionStore(time.Hour),
 		Logins:       auth.NewRateLimiter(20, time.Minute),
-		Access:       NewAccessStore(),
+		Access:       access,
 		Logger:       discard(),
 		StartedAt:    time.Now(),
 	})

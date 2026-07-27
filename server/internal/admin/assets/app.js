@@ -107,6 +107,12 @@
   }
 
   // --- access users ---
+  function fmtDate(iso) {
+    if (!iso) return "—";
+    var d = new Date(iso);
+    return isNaN(d.getTime()) ? "—" : d.toLocaleDateString();
+  }
+
   async function loadUsers() {
     var users = await api("access-users");
     var tb = document.getElementById("users");
@@ -123,9 +129,15 @@
         await api("access-users/delete", "POST", { id: u.id });
         loadUsers();
       });
+      var status = el("span", {
+        class: "badge " + (u.expired ? "bad" : "ok"),
+        text: u.expired ? t("status_expired") : t("status_active"),
+      });
       tb.appendChild(el("tr", null, [
         el("td", { text: u.label }),
-        el("td", null, [el("span", { class: "mono", text: u.token })]),
+        el("td", { text: fmtDate(u.created) }),
+        el("td", { text: u.expires ? fmtDate(u.expires) : t("expiry_never") }),
+        el("td", null, [status]),
         el("td", null, [copyBtn]),
         el("td", null, [del]),
       ]));
@@ -134,7 +146,8 @@
 
   document.getElementById("add-user").addEventListener("click", async function () {
     var label = document.getElementById("new-label").value;
-    await api("access-users", "POST", { label: label });
+    var expiresDays = parseInt(document.getElementById("new-expiry").value, 10) || 0;
+    await api("access-users", "POST", { label: label, expiresDays: expiresDays });
     document.getElementById("new-label").value = "";
     loadUsers();
   });
