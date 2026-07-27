@@ -68,6 +68,32 @@ fetch() { # fetch URL -> stdout
   else die "need curl or wget"; fi
 }
 
+# download_progress URL OUT — like download but shows a progress bar (big files).
+download_progress() {
+  if have curl; then curl -fL --progress-bar "$1" -o "$2"
+  elif have wget; then wget -q --show-progress "$1" -O "$2"
+  else die "need curl or wget"; fi
+}
+
+# spin "message" cmd [args...] — run cmd while showing a live spinner, so the
+# user sees a long step is working. Prints ✓/✗ and, on failure, the last log
+# lines. Non-interactive: runs quietly and just returns the exit code.
+spin() {
+  local msg="$1"; shift
+  local log rc pid i=0 frames='|/-\'
+  log="$(mktemp)"
+  if ! [ -t 1 ]; then "$@" </dev/null >"$log" 2>&1; rc=$?; rm -f "$log"; return "$rc"; fi
+  "$@" </dev/null >"$log" 2>&1 &
+  pid=$!
+  printf '  %s  ' "$msg"
+  while kill -0 "$pid" 2>/dev/null; do printf '\b%s' "${frames:i++%4:1}"; sleep 0.1; done
+  wait "$pid"; rc=$?
+  if [ "$rc" -eq 0 ]; then printf '\b%b✓%b\n' "$c_green" "$c_reset"
+  else printf '\b%b✗%b\n' "$c_red" "$c_reset"; echo -e "${c_dim}$(tail -n 4 "$log")${c_reset}" >&2; fi
+  rm -f "$log"
+  return "$rc"
+}
+
 detect_arch() {
   case "$(uname -m)" in
     x86_64 | amd64) echo amd64 ;;
@@ -161,7 +187,7 @@ install_binary() { # install_binary TAG ARCH
   local tag="$1" arch="$2" asset="bumshid_linux_$2" tmp
   tmp="$(mktemp -d)"
   info "downloading ${asset} (${tag})"
-  download "$(rel_url "$tag" "$asset")" "${tmp}/${asset}"
+  download_progress "$(rel_url "$tag" "$asset")" "${tmp}/${asset}"
   download "$(rel_url "$tag" checksums.txt)" "${tmp}/checksums.txt"
   (cd "$tmp" && grep " ${asset}\$" checksums.txt | sha256sum -c - >/dev/null) ||
     { rm -rf "$tmp"; die "checksum verification failed"; }
@@ -243,13 +269,12 @@ open_firewall() {
 
 install_caddy_pkg() {
   have apt-get || return 1
-  info "installing Caddy"
-  apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg >/dev/null 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg >/dev/null 2>&1 || true
   curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key |
-    gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt |
     tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
-  apt-get update -y >/dev/null && apt-get install -y caddy >/dev/null
+  apt-get update -y >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y caddy >/dev/null
 }
 
 # emit_site_block — prints the marked Bumshi Caddy site block to stdout.
@@ -271,8 +296,7 @@ emit_site_block() {
 # provider (needed for automatic certificates via the DNS-01 challenge).
 ensure_caddy_cf_plugin() {
   caddy list-modules 2>/dev/null | grep -q 'dns.providers.cloudflare' && return 0
-  info "adding the Cloudflare DNS plugin to Caddy (one-time)"
-  caddy add-package github.com/caddy-dns/cloudflare >/dev/null 2>&1 || return 1
+  spin "Adding Cloudflare DNS plugin to Caddy (one-time)" caddy add-package github.com/caddy-dns/cloudflare || return 1
   systemctl restart caddy 2>/dev/null || true
   caddy list-modules 2>/dev/null | grep -q 'dns.providers.cloudflare'
 }
@@ -339,7 +363,7 @@ setup_tls() {
 
   if ! have caddy; then
     if confirm "Caddy (the TLS front end) isn't installed. Install it now?" y; then
-      install_caddy_pkg || { warn "Caddy install failed; set up TLS manually to 127.0.0.1:8080"; return; }
+      spin "Installing Caddy" install_caddy_pkg || { warn "Caddy install failed; set up TLS manually to 127.0.0.1:8080"; return; }
     else
       warn "skipping Caddy; reverse-proxy your own TLS to 127.0.0.1:8080"; return
     fi
@@ -394,6 +418,7 @@ summary() {
     echo -e "  ${c_bold}Password${c_reset} ${c_yellow}${admin_pass}${c_reset}  ${c_dim}(shown once — save it now)${c_reset}"
   fi
   echo -e "  ${c_bold}Manage${c_reset}   bumshi menu   ${c_dim}(status / logs / restart / update)${c_reset}"
+  echo -e "  ${c_bold}Remove${c_reset}   bash <(wget -qO- $(raw_url uninstall.sh))"
   if [ "${behind_cf:-n}" = "y" ]; then
     echo
     echo -e "  ${c_dim}Cloudflare: point ${domain} (proxied / orange cloud) at this server's IP,"
