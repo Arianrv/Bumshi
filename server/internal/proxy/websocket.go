@@ -76,6 +76,9 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, target 
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
+	// A 101 has no body (http.NoBody, so Close is a no-op); on any other status
+	// this releases it. Tunneling reads from upstreamBR / the raw conn, not here.
+	defer upResp.Body.Close()
 	if upResp.StatusCode != http.StatusSwitchingProtocols {
 		h.count("upstream_error")
 		http.Error(w, "upstream did not upgrade", http.StatusBadGateway)

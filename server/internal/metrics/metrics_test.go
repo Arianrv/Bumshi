@@ -30,7 +30,7 @@ func TestCounterVec(t *testing.T) {
 	c.Inc("200")
 	c.Inc("200")
 	c.Inc("500")
-	c.Add(-5, "200") // ignored: counters never decrease
+	c.Add(-5, "200")      // ignored: counters never decrease
 	c.Inc("200", "extra") // ignored: label arity mismatch
 
 	body := render(t, r)

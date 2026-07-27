@@ -51,8 +51,8 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 
 	mainHandler := httpx.Chain(
 		routes(hc, proxyHandler, engineHandler, adminHandler, cfg.AdminPath),
-		httpx.RequestID(),          // outermost: every layer sees the ID
-		httpx.Metrics(collectors),  // count even panicked requests (recovered below)
+		httpx.RequestID(),         // outermost: every layer sees the ID
+		httpx.Metrics(collectors), // count even panicked requests (recovered below)
 		httpx.Recoverer(logger),
 		httpx.SecurityHeaders(),
 		httpx.AccessLog(logger, live.AccessLog), // innermost; consulted per request
