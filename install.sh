@@ -51,7 +51,7 @@ section() {
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
-interactive() { [ -t 0 ]; }
+interactive() { [ -t 0 ] && [ -e /dev/tty ]; }
 require_root() { [ "$(id -u)" -eq 0 ] || die "please run as root (try: sudo bash ...)"; }
 
 raw_url() { echo "https://raw.githubusercontent.com/${REPO}/${REF}/$1"; }
@@ -88,8 +88,8 @@ ask() {
   if ! interactive; then printf -v "$__var" '%s' "$def"; return; fi
   echo -e "${c_bold}${label}${c_reset}"
   [ -n "$desc" ] && echo -e "${c_dim}${desc}${c_reset}"
-  if [ -n "$def" ]; then read -rp "$(echo -e "  ${c_teal}›${c_reset} [${def}]: ")" ans || true
-  else read -rp "$(echo -e "  ${c_teal}›${c_reset} ")" ans || true; fi
+  if [ -n "$def" ]; then read -rp "$(echo -e "  ${c_teal}›${c_reset} [${def}]: ")" ans </dev/tty || true
+  else read -rp "$(echo -e "  ${c_teal}›${c_reset} ")" ans </dev/tty || true; fi
   printf -v "$__var" '%s' "${ans:-$def}"
   echo
 }
@@ -100,7 +100,7 @@ ask_secret() {
   if ! interactive; then printf -v "$__var" '%s' ""; return; fi
   echo -e "${c_bold}${label}${c_reset}"
   [ -n "$desc" ] && echo -e "${c_dim}${desc}${c_reset}"
-  read -rsp "$(echo -e "  ${c_teal}›${c_reset} ")" ans || true
+  read -rsp "$(echo -e "  ${c_teal}›${c_reset} ")" ans </dev/tty || true
   echo; echo
   printf -v "$__var" '%s' "$ans"
 }
@@ -110,7 +110,7 @@ confirm() {
   local q="$1" def="${2:-n}" ans hint
   if ! interactive; then [ "$def" = "y" ]; return; fi
   [ "$def" = "y" ] && hint="Y/n" || hint="y/N"
-  read -rp "$(echo -e "${c_bold}${q}${c_reset} [${hint}]: ")" ans || true
+  read -rp "$(echo -e "${c_bold}${q}${c_reset} [${hint}]: ")" ans </dev/tty || true
   ans="${ans:-$def}"
   [[ "$ans" =~ ^[Yy]$ ]]
 }
@@ -124,7 +124,7 @@ choose() {
   echo -e "${c_bold}${q}${c_reset}"
   for i in "${!opts[@]}"; do echo -e "  ${c_teal}$((i + 1)))${c_reset} ${opts[$i]}"; done
   while :; do
-    read -rp "$(echo -e "  ${c_teal}›${c_reset} [1]: ")" ans || true
+    read -rp "$(echo -e "  ${c_teal}›${c_reset} [1]: ")" ans </dev/tty || true
     ans="${ans:-1}"
     [[ "$ans" =~ ^[0-9]+$ ]] && [ "$ans" -ge 1 ] && [ "$ans" -le "${#opts[@]}" ] && break
     warn "enter a number between 1 and ${#opts[@]}"
