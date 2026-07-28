@@ -190,9 +190,33 @@
   }
 
   // --- register the service worker (safety net) ---
+  // On the very first visit the worker is not controlling this document yet, so
+  // early requests the in-page hooks cannot catch — dynamic import(), Worker(),
+  // module preloads, anything racing before activation — escape the proxy. The
+  // page then renders half-broken: subresources 404 and JS-drawn overlays (age
+  // gates, consent modals) never appear. Once the worker takes control, reload
+  // ONCE so the whole document renders under interception. A per-tab session
+  // flag makes the reload fire at most once, so there is no reload loop.
   if (self.navigator && self.navigator.serviceWorker) {
     try {
-      self.navigator.serviceWorker.register("/__bumshi__/sw.js", { scope: "/" });
+      var swc = self.navigator.serviceWorker;
+      swc.register("/__bumshi__/sw.js", { scope: "/" });
+      if (!swc.controller) {
+        var RELOAD_FLAG = "__bumshi_sw_reloaded__";
+        swc.addEventListener("controllerchange", function () {
+          try {
+            if (self.sessionStorage && self.sessionStorage.getItem(RELOAD_FLAG)) {
+              return;
+            }
+            if (self.sessionStorage) {
+              self.sessionStorage.setItem(RELOAD_FLAG, "1");
+            }
+          } catch (e) {
+            /* ignore */
+          }
+          self.location.reload();
+        });
+      }
     } catch (e) {
       /* ignore */
     }
