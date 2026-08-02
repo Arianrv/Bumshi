@@ -256,14 +256,34 @@
           if (!host || eq < 0) {
             return;
           }
-          // A page can only set a host-only cookie for the document it runs in;
-          // Domain= is dropped rather than honoured, since scoping it wider is
-          // exactly the leak this whole scheme exists to prevent.
-          var rest = raw.slice(eq + 1).split(";").filter(function (attr) {
-            return !/^\s*domain\s*=/i.test(attr) && !/^\s*path\s*=/i.test(attr);
-          });
-          var name = B.cookiePrefix(host, false) + raw.slice(0, eq).trim();
-          native.set.call(self.document, name + "=" + rest.join(";") + "; Path=/");
+          // Split off the value (always first) from the attributes, pulling out
+          // Domain= and discarding Path= — everything is stored at Path=/ on the
+          // shared origin.
+          var parts = raw.slice(eq + 1).split(";");
+          var keep = [parts[0]];
+          var domain = "";
+          for (var i = 1; i < parts.length; i++) {
+            var m = /^\s*domain\s*=(.*)$/i.exec(parts[i]);
+            if (m) {
+              domain = m[1].trim();
+              continue;
+            }
+            if (/^\s*path\s*=/i.test(parts[i])) {
+              continue;
+            }
+            keep.push(parts[i]);
+          }
+          // Scope it exactly as the server scopes an equivalent Set-Cookie.
+          // Dropping Domain= here instead — which this did — stores a second,
+          // host-only copy of a cookie the server already stored domain-scoped.
+          // Both then match on the way out and the upstream request carries
+          // "Cookie: NID=<server>; NID=<script>". A site that signs or pins that
+          // cookie reads the conflict as tampering: on Google it is an immediate
+          // and unclearable "unusual traffic" interstitial, because solving the
+          // challenge only rewrites the server's copy and leaves the other.
+          var sc = B.cookieScope(domain, host);
+          var name = B.cookiePrefix(sc.scope, sc.domainMatch) + raw.slice(0, eq).trim();
+          native.set.call(self.document, name + "=" + keep.join(";") + "; Path=/");
         },
       });
     } catch (e) {

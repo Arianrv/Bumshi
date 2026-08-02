@@ -43,30 +43,50 @@ class Storage {
   }
 }
 
+/**
+ * The browser's real cookie jar for the proxy origin: one flat namespace shared
+ * by every proxied site, which is the whole reason names carry a scope.
+ */
+class Document {
+  jar = new Map();
+  addEventListener() {}
+  documentElement = null;
+  get cookie() {
+    return [...this.jar].map(([k, v]) => k + "=" + v).join("; ");
+  }
+  set cookie(v) {
+    const s = String(v);
+    const eq = s.indexOf("=");
+    if (eq < 0) return;
+    this.jar.set(s.slice(0, eq).trim(), s.slice(eq + 1).split(";")[0]);
+  }
+}
+
 const TARGET = "https://www.youtube.com/watch?v=abc";
 
 /**
- * Boots codec.js + rewriter.js + client.js on a page proxying TARGET.
- * Returns the context plus direct handles on the backing Storage objects, so a
- * test can see what was really persisted rather than what the shim reports.
+ * Boots codec.js + rewriter.js + client.js on a page proxying `target`.
+ * Returns the context plus direct handles on the backing Storage and Document,
+ * so a test can see what was really persisted rather than what the shims report.
  */
-function boot() {
-  const ctx = { URL, TextEncoder, TextDecoder, btoa, atob, console, Proxy, Reflect, Object, JSON, Number, String };
+function boot(target = TARGET) {
+  const ctx = { URL, TextEncoder, TextDecoder, btoa, atob, console, Proxy, Reflect, Object, JSON, Number, String, RegExp };
   ctx.self = ctx;
   ctx.window = ctx;
 
-  const enc = Buffer.from(TARGET, "utf8").toString("base64url");
+  const enc = Buffer.from(target, "utf8").toString("base64url");
   ctx.location = {
     origin: "https://vps.example",
     pathname: "/p/" + enc,
     href: "https://vps.example/p/" + enc,
     reload() {},
   };
-  ctx.document = { addEventListener() {}, documentElement: null, cookie: "" };
+  ctx.Document = Document;
   ctx.navigator = { userAgent: "node" };
   ctx.addEventListener = () => {};
 
-  const backing = { local: new Storage(), session: new Storage() };
+  const backing = { local: new Storage(), session: new Storage(), doc: new Document() };
+  ctx.document = backing.doc;
   ctx.localStorage = backing.local;
   ctx.sessionStorage = backing.session;
 
@@ -76,6 +96,9 @@ function boot() {
   }
   return { ctx, backing };
 }
+
+// FNV-1a of "google.com", shared with cookies_test.go and RoutingTest.kt.
+const GOOGLE_D = "b_e1a2c1ae38dcdf45d_";
 
 // Shared with server/internal/proxy/cookies_test.go and RoutingTest.kt: the
 // storage scope reuses the cookie-scope hash, so www.youtube.com must produce
@@ -157,4 +180,61 @@ test("storage: localStorage and sessionStorage stay independent", () => {
   ctx.sessionStorage.k = "session";
   assert.equal(ctx.localStorage.k, "local");
   assert.equal(ctx.sessionStorage.k, "session");
+});
+
+// --- document.cookie scoping ---
+//
+// The server packs an upstream Set-Cookie under the scope its Domain= implies.
+// A script setting the same cookie must land on that same name. When this shim
+// dropped Domain= and always wrote host-only, the jar held two copies of one
+// cookie and unpackCookies matched both, so the upstream request carried
+// "Cookie: NID=<server>; NID=<script>".
+
+test("cookie: a script's Domain= is scoped the way the server scopes Set-Cookie", () => {
+  const { ctx, backing } = boot("https://www.google.com/search?q=x");
+  ctx.document.cookie = "NID=JS_VALUE; domain=.google.com; path=/; Secure";
+
+  assert.deepEqual(
+    Object.keys(Object.fromEntries(backing.doc.jar)),
+    [GOOGLE_D + "NID"],
+    "a domain cookie must be stored under the domain scope, not host-only",
+  );
+});
+
+test("cookie: server and script writes collapse onto one name", () => {
+  const { ctx, backing } = boot("https://www.google.com/search?q=x");
+
+  // What packSetCookie would have stored for: Set-Cookie: NID=A; Domain=.google.com
+  backing.doc.jar.set(GOOGLE_D + "NID", "SERVER_VALUE");
+  // What the page's own script stores for the same cookie.
+  ctx.document.cookie = "NID=JS_VALUE; domain=.google.com";
+
+  assert.equal(backing.doc.jar.size, 1, "one logical cookie must occupy one slot");
+  assert.equal(backing.doc.jar.get(GOOGLE_D + "NID"), "JS_VALUE");
+
+  // And the page reads back exactly one NID.
+  const seen = ctx.document.cookie.split("; ").filter((c) => c.startsWith("NID="));
+  assert.deepEqual(Array.from(seen), ["NID=JS_VALUE"]);
+});
+
+test("cookie: a host-only cookie stays host-only", () => {
+  const { ctx, backing } = boot("https://www.google.com/search?q=x");
+  ctx.document.cookie = "localpref=1";
+  const [name] = [...backing.doc.jar.keys()];
+  assert.ok(name.endsWith("h_localpref"), `expected host scope, got ${name}`);
+});
+
+test("cookie: a Domain the host is not inside is refused", () => {
+  const { ctx, backing } = boot("https://www.google.com/search?q=x");
+  ctx.document.cookie = "evil=1; domain=.example.com";
+  const [name] = [...backing.doc.jar.keys()];
+  assert.ok(name.endsWith("h_evil"), `must fall back to host scope, got ${name}`);
+  assert.ok(!name.startsWith("b_" + "e1a2c1ae38dcdf45"), "must not borrow another scope");
+});
+
+test("cookie: a page sees only its own cookies, under real names", () => {
+  const { ctx, backing } = boot("https://www.google.com/search?q=x");
+  backing.doc.jar.set(GOOGLE_D + "NID", "mine");
+  backing.doc.jar.set("b_ffffffffffffffffd_SESSION", "someone else's");
+  assert.equal(ctx.document.cookie, "NID=mine");
 });

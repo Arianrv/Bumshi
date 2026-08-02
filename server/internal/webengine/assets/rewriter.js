@@ -168,8 +168,37 @@
     return out;
   }
 
+  // cookieScope decides which scope a cookie belongs to, mirroring cookieScope in
+  // server/internal/proxy/cookies.go exactly. A page setting a cookie through
+  // document.cookie must land on the same name the server would have chosen for
+  // the equivalent Set-Cookie, or the jar ends up holding two copies of one
+  // cookie under two scopes and both are unpacked onto the same upstream
+  // request.
+  //
+  // A Domain is honoured only when the request host is inside it and it has at
+  // least two labels, so a page cannot claim a cookie for a whole suffix.
+  function cookieScope(domainAttr, requestHost) {
+    var host = String(requestHost == null ? "" : requestHost)
+      .toLowerCase()
+      .replace(/\.$/, "");
+    var d = String(domainAttr == null ? "" : domainAttr)
+      .trim()
+      .toLowerCase()
+      .replace(/^\./, "")
+      .replace(/\.$/, "");
+    if (!d || d.indexOf(".") < 0) {
+      return { scope: host, domainMatch: false };
+    }
+    // d === host, or host is a subdomain of d.
+    if (("." + host).slice(-(d.length + 1)) !== "." + d) {
+      return { scope: host, domainMatch: false };
+    }
+    return { scope: d, domainMatch: true };
+  }
+
   B.cookiePrefix = cookiePrefix;
   B.scopePrefixes = scopePrefixes;
+  B.cookieScope = cookieScope;
 
   B.PREFIX = PREFIX;
   B.ENGINE = ENGINE;

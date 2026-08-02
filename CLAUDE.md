@@ -66,6 +66,22 @@ unreadable at once, and every signed-in session breaks simultaneously. The same
 test vectors appear in all three test suites on purpose — change them together
 or not at all.
 
+**`cookieScope` has the same requirement**, and it is easier to get wrong because
+the two copies are reached by different paths:
+
+- `server/internal/proxy/cookies.go` scopes an upstream `Set-Cookie`
+- `server/internal/webengine/assets/rewriter.js` scopes a `document.cookie` write
+
+Both must choose the same name for the same logical cookie. When they disagree —
+the shim once dropped `Domain=` and always wrote host-only, while the server
+honoured it — the jar holds two copies under two scopes, `unpackCookies` matches
+both, and the upstream request carries `Cookie: NID=<server>; NID=<script>`.
+Sites that sign or pin a cookie read that as tampering. On Google it is an
+immediate "unusual traffic" interstitial that **cannot be cleared**, because
+solving the challenge rewrites only the server's copy and leaves the other in
+place. Fixing the code does not fix an already-poisoned jar: the stale cookie
+stays until its own expiry, so clearing browser storage is part of the fix.
+
 ## Things that look like bugs and are not
 
 - The proxy deliberately does **not** impose the service's own security headers
