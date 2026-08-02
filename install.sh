@@ -219,6 +219,47 @@ install_mgmt() {
   fi
 }
 
+# migrate_env adds settings a newer bumshid requires but an older env file does
+# not have.
+#
+# Without this, "keep existing configuration" leaves the file as it was and the
+# service refuses to start after an upgrade that added a required setting — the
+# upgrade looks successful and the daemon is dead. Existing values are never
+# overwritten; only absent keys are appended.
+migrate_env() {
+  [ -f "$ENV_FILE" ] || return 0
+  local added=0
+
+  add_if_missing() { # add_if_missing KEY VALUE COMMENT
+    grep -qE "^${1}=" "$ENV_FILE" && return 0
+    {
+      printf '\n# %s\n' "$3"
+      printf '%s=%s\n' "$1" "$2"
+    } >>"$ENV_FILE"
+    added=1
+  }
+
+  add_if_missing BUMSHI_ADMIN_ADDR "127.0.0.1:8081" \
+    "The panel's own listener: it must never share an origin with proxied content."
+
+  # Deliberately NOT defaulted to true: flipping it on an install whose users
+  # have no tokens yet would lock every one of them out. The open-relay
+  # acknowledgement keeps the service running until the operator migrates.
+  if ! grep -qE '^BUMSHI_PROXY_REQUIRE_TOKEN=true' "$ENV_FILE"; then
+    add_if_missing BUMSHI_PROXY_ALLOW_OPEN_RELAY "true" \
+      "This proxy has no access control. Create access users in the panel, set BUMSHI_PROXY_REQUIRE_TOKEN=true, then delete this line."
+  fi
+
+  if [ -n "${public_url:-}" ]; then
+    add_if_missing BUMSHI_PUBLIC_URL "$public_url" "Base URL end users connect to."
+  fi
+
+  if [ "$added" = "1" ]; then
+    ok "added new settings this version requires to ${ENV_FILE}"
+    warn "this instance is running WITHOUT access control; see BUMSHI_PROXY_ALLOW_OPEN_RELAY in ${ENV_FILE}"
+  fi
+}
+
 write_env() {
   local hash=""
   if [ -n "$admin_pass" ]; then
@@ -522,6 +563,7 @@ main() {
     setup_tls
   else
     info "keeping existing configuration"
+    migrate_env
     # Re-read a couple of values so the summary is accurate.
     admin_user="$(grep -E '^BUMSHI_ADMIN_USERNAME=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "$admin_user")"
     admin_path="$(grep -E '^BUMSHI_ADMIN_PATH=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "$admin_path")"

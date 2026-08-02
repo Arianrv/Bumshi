@@ -4,6 +4,18 @@ Documentation=https://github.com/bumshi/bumshi
 After=network-online.target
 Wants=network-online.target
 
+# A configuration error never fixes itself by retrying, and the default is to
+# retry forever: an upgrade that invalidates the config leaves a service
+# machine-gunning restarts for as long as nobody looks at it, burying the one
+# log line that explains why. Give up after five attempts in a minute and stay
+# failed, so `bumshi status` shows a dead service with the reason at the end of
+# the journal rather than scrolled off it.
+#
+# These are [Unit] directives. In [Service] modern systemd ignores them with an
+# "Unknown key name" warning, so the limit would silently never apply.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=bumshi

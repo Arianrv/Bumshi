@@ -23,7 +23,11 @@ need_systemd() {
 svc()      { need_systemd; systemctl "$1" "$SERVICE"; }
 start()    { svc start;   echo "started"; }
 stop()     { svc stop;    echo "stopped"; }
-restart()  { svc restart; echo "restarted"; }
+# reset-failed first: once the start-rate limit latches a unit into the failed
+# state, systemctl start/restart refuses outright with "start request repeated
+# too quickly" — and the operator, having just fixed the config, sees a second
+# unexplained failure rather than a working service.
+restart()  { need_systemd; systemctl reset-failed "$SERVICE" 2>/dev/null || true; svc restart; echo "restarted"; }
 status()   { need_systemd; systemctl --no-pager status "$SERVICE" || true; }
 enable()   { svc enable;  echo "enabled at boot"; }
 disable()  { svc disable; echo "disabled at boot"; }
