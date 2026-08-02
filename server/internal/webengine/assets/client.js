@@ -306,21 +306,35 @@
       } catch (e) {
         return; // storage disabled by policy
       }
-      var facade = {
+      // A plain object carrying getItem/setItem is not a usable stand-in for
+      // Storage. Most real code reaches keys as properties — `store.token`,
+      // `store["token"] = v`, `delete store.token`, `Object.keys(store)`,
+      // `for (k in store)` — and a facade drops every one of them silently: the
+      // write lands on the facade and is gone at the next reload, while
+      // Object.keys reports the facade's own method names instead of the stored
+      // keys, so anything that enumerates its storage reads back "getItem" and
+      // "setItem" as though they were data.
+      //
+      // A Proxy over the real Storage keeps the entire interface, including the
+      // prototype chain: `localStorage instanceof Storage` stays true and
+      // Object.prototype.toString still reports [object Storage]. That matters
+      // past correctness — an object failing those checks is a glaring anomaly
+      // to any script that inspects its environment.
+      var methods = {
         getItem: function (k) {
           var p = scope();
-          return p ? native.getItem(p + k) : null;
+          return p ? native.getItem(p + String(k)) : null;
         },
         setItem: function (k, v) {
           var p = scope();
           if (p) {
-            native.setItem(p + k, v);
+            native.setItem(p + String(k), String(v));
           }
         },
         removeItem: function (k) {
           var p = scope();
           if (p) {
-            native.removeItem(p + k);
+            native.removeItem(p + String(k));
           }
         },
         key: function (i) {
@@ -329,6 +343,7 @@
             return null;
           }
           var mine = ownKeys(native, p);
+          i = Number(i) || 0;
           return i >= 0 && i < mine.length ? mine[i] : null;
         },
         clear: function () {
@@ -340,16 +355,94 @@
           }
         },
       };
-      Object.defineProperty(facade, "length", {
-        get: function () {
-          var p = scope();
-          return p ? ownKeys(native, p).length : 0;
-        },
-      });
+
+      var view;
       try {
-        Object.defineProperty(self, name, { configurable: true, get: function () { return facade; } });
+        view = new Proxy(native, {
+          get: function (t, prop) {
+            // Symbols (Symbol.toStringTag among them) belong to the real object.
+            if (typeof prop !== "string") {
+              return Reflect.get(t, prop, t);
+            }
+            if (Object.prototype.hasOwnProperty.call(methods, prop)) {
+              return methods[prop];
+            }
+            if (prop === "length") {
+              var n = scope();
+              return n ? ownKeys(t, n).length : 0;
+            }
+            var p = scope();
+            if (!p) {
+              return undefined;
+            }
+            var v = t.getItem(p + prop);
+            return v === null ? undefined : v;
+          },
+          set: function (t, prop, value) {
+            if (typeof prop !== "string") {
+              return Reflect.set(t, prop, value);
+            }
+            var p = scope();
+            if (p) {
+              t.setItem(p + prop, String(value));
+            }
+            return true;
+          },
+          has: function (t, prop) {
+            if (typeof prop !== "string") {
+              return Reflect.has(t, prop);
+            }
+            if (prop === "length" || Object.prototype.hasOwnProperty.call(methods, prop)) {
+              return true;
+            }
+            var p = scope();
+            return !!p && t.getItem(p + prop) !== null;
+          },
+          deleteProperty: function (t, prop) {
+            if (typeof prop !== "string") {
+              return Reflect.deleteProperty(t, prop);
+            }
+            var p = scope();
+            if (p) {
+              t.removeItem(p + prop);
+            }
+            return true;
+          },
+          ownKeys: function (t) {
+            var p = scope();
+            return p ? ownKeys(t, p) : [];
+          },
+          getOwnPropertyDescriptor: function (t, prop) {
+            if (typeof prop !== "string") {
+              return Reflect.getOwnPropertyDescriptor(t, prop);
+            }
+            var p = scope();
+            if (!p) {
+              return undefined;
+            }
+            var v = t.getItem(p + prop);
+            if (v === null) {
+              return undefined;
+            }
+            // configurable must stay true: a Proxy may not report a
+            // non-configurable property the target does not really have.
+            return { value: v, writable: true, enumerable: true, configurable: true };
+          },
+        });
       } catch (e) {
-        /* ignore */
+        return; // no Proxy support: leave storage working rather than break it
+      }
+
+      try {
+        Object.defineProperty(self, name, {
+          configurable: true,
+          enumerable: true,
+          get: function () {
+            return view;
+          },
+        });
+      } catch (e) {
+        /* a browser that will not let us redefine it keeps the native behaviour */
       }
     }
 
