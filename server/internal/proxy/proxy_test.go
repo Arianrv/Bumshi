@@ -218,7 +218,7 @@ func TestOversizedTextBodyIsServedWholeNotTruncated(t *testing.T) {
 		Logger:          discard(),
 		Collectors:      NewCollectors(metrics.NewRegistry()),
 		RewriteMaxBytes: 64,
-		InjectHTML:      func(b []byte) []byte { return append([]byte("<!--boot-->"), b...) },
+		InjectHTML:      func(b []byte, _ string) []byte { return append([]byte("<!--boot-->"), b...) },
 	})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/big"), nil))
@@ -246,7 +246,7 @@ func TestBootstrapNotInjectedIntoFetchedFragments(t *testing.T) {
 		Client:     upstream.Client(),
 		Logger:     discard(),
 		Collectors: NewCollectors(metrics.NewRegistry()),
-		InjectHTML: func(b []byte) []byte { return append([]byte("<!--boot-->"), b...) },
+		InjectHTML: func(b []byte, _ string) []byte { return append([]byte("<!--boot-->"), b...) },
 	})
 
 	// An absent header means a client that does not send it, where assuming
