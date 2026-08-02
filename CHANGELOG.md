@@ -7,6 +7,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **Single-page apps no longer navigate themselves out of the proxy.** A site
+  rewriting its own address with `history.pushState(state, "", "/watch?v=x")`
+  had that resolved against the document URL — `/p/<token>` — so the address
+  became `https://<proxy>/watch?v=x`: a path the server does not route, making
+  a reload a 404. The silent half was worse. `pushState` issues no network
+  request, so neither the service worker nor the host app could ever see it,
+  and once the pathname stopped being a valid token `realBase()` fell back to
+  `location.href` — from that moment every relative URL on the page resolved
+  against the proxy instead of the site, and requests left unproxied. One
+  `pushState` poisoned the document. Both History methods now map their URL
+  argument, as do `window.open`, `Worker`, `SharedWorker`, `EventSource` and
+  `navigator.sendBeacon`.
+  `Location`'s own members remain unpatched because they cannot be patched: the
+  HTML spec marks the whole interface `[LegacyUnforgeable]`. Same-origin
+  navigations through them are still caught by the service worker; a scripted
+  navigation to an absolute foreign URL has to be re-wrapped by the host app.
+- **A proxied page can no longer take the origin away from the runtime.** Every
+  site shares one origin, so a site registering its own service worker at scope
+  `/` would replace Bumshi's and strip interception from every open tab at once.
+  Registration is now refused with a rejected promise — the script URL could
+  never resolve anyway, and rejecting immediately lets the site's own fallback
+  run instead of leaving it waiting on a request that 404s.
 - **WebSocket tunneling now works at all.** The tunnel hijacked the connection
   with a `w.(http.Hijacker)` type assertion, which can never succeed once the
   metrics middleware wraps the `ResponseWriter`, so every upgrade returned
@@ -61,6 +83,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which is exactly what a browser talking to that site directly would send.
 
 ### Security
+- **The client's real IP no longer leaks to every site they visit.** Deployed
+  behind a CDN, each inbound request arrives carrying that CDN's record of the
+  original visitor — `CF-Connecting-IP` with Cloudflare, alongside
+  `CF-IPCountry`, `CF-Ray`, `CF-Visitor`, `CDN-Loop` and `Via`. The header
+  filter was a denylist naming `X-Forwarded-For`, `X-Real-IP` and `Forwarded`,
+  so none of that family was caught and all of it went upstream: every target
+  site was told the user's home address and country, which is the one
+  disclosure this service exists to prevent, and which the package
+  documentation claimed was impossible. It also reads to any anti-abuse system
+  as a request announcing itself as a relay — a datacenter source IP asserting
+  a residential client in another country — which is enough on its own to earn
+  Google's "unusual traffic" interstitial. The filter is now an **allowlist**:
+  only headers a browser legitimately sends are forwarded, so an edge nobody
+  anticipated cannot leak by default. `internal/proxy.TestEdgeHeadersDoNotLeakClientIdentity`
+  covers it, including a header invented for the test that no denylist could
+  have contained.
+- **Streaming media plays properly.** Three things were working against it. The
+  upstream `Content-Length` was dropped from every response including untouched
+  byte streams, so media arrived chunked and a `<video>` element could neither
+  report a duration nor seek until the whole file had downloaded; it is now kept
+  whenever the body passes through unmodified. The transport pooled only four
+  idle connections per host, while a DASH or HLS player makes a continuous
+  stream of small ranged requests to one CDN host, so past the fourth every
+  segment paid a fresh TCP and TLS handshake — on a link to Iran, hundreds of
+  milliseconds, every few seconds of playback. And the service worker set
+  `referrerPolicy: "no-referrer"` on everything it intercepted, which is most of
+  a page: the server then had no referrer to decode, sent none upstream, and
+  computed `Sec-Fetch-Site: none` — an assertion that the user typed the URL
+  into the address bar, attached to a subresource inside a document. That broke
+  referrer-checking CDNs (images and video above all) and quietly undid the
+  sign-in fix above for every request the worker handled.
+- Proxied POSTs now carry `Content-Length` instead of going out chunked. Go
+  derives it from `Request.ContentLength` and ignores a header of that name, so
+  it has to be assigned across explicitly; some origins reject chunked uploads,
+  and a browser sends a length for an ordinary form submission.
 - **Cookies are namespaced per site.** Every proxied site shared one browser
   origin, so the browser handed each site every other site's cookies and the
   proxy forwarded them upstream — a user signed in to Google had their session

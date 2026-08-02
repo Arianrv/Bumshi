@@ -114,6 +114,98 @@
     self.WebSocket = WrappedWS;
   }
 
+  // --- History API ---
+  //
+  // This is the one escape nothing else can catch. A single-page app rewrites
+  // its own address as the user moves around:
+  //
+  //   history.pushState(state, "", "/watch?v=xyz")
+  //
+  // and the browser resolves that against the document URL, which is
+  // "/p/<token>". Left alone the address becomes "https://<proxy>/watch?v=xyz":
+  // a path this server does not route, so a reload is a 404 and the session is
+  // gone.
+  //
+  // The quiet half is worse. pushState makes no network request, so neither the
+  // service worker nor the host app ever sees it — there is no request to
+  // intercept. And once the pathname stops being a valid token, realBase() can
+  // no longer decode it and falls back to location.href, so from that moment
+  // every relative URL on the page resolves against the PROXY rather than the
+  // site, and requests leave unproxied. One pushState poisons the document.
+  //
+  // Mapping the argument keeps the address inside "/p/", which keeps reloads,
+  // back/forward and relative resolution all working.
+  if (self.history) {
+    ["pushState", "replaceState"].forEach(function (name) {
+      var nativeFn = self.history[name];
+      if (typeof nativeFn !== "function") {
+        return;
+      }
+      self.history[name] = function (state, title, url) {
+        // Omitted or empty means "keep the current address", which is already
+        // a proxy URL. Passing a mapped value would change it.
+        if (url === undefined || url === null || url === "") {
+          return nativeFn.call(this, state, title);
+        }
+        return nativeFn.call(this, state, title, toProxy(url));
+      };
+    });
+  }
+
+  // --- other URL-taking APIs ---
+  //
+  // location.assign, location.replace and `location.href = ...` are absent on
+  // purpose: the HTML spec marks every member of Location [LegacyUnforgeable],
+  // so they are non-configurable own properties and cannot be patched by any
+  // script. Same-origin navigations through them are still caught, because they
+  // do make a request and the service worker rewrites it; a scripted navigation
+  // to an absolute foreign URL is not, and the host app has to re-wrap that one
+  // in shouldOverrideUrlLoading. That is why the app-side catch is load-bearing
+  // rather than a nicety.
+  var _open = self.open;
+  if (typeof _open === "function") {
+    self.open = function (url) {
+      if (url !== undefined && url !== null && url !== "") {
+        arguments[0] = toProxy(url);
+      }
+      return _open.apply(this, arguments);
+    };
+  }
+
+  // Workers: the script URL must resolve against the real site, not the proxy
+  // root. Their own global scope is unhooked, but a worker is a client of the
+  // service worker, so the requests it goes on to make are still rewritten.
+  ["Worker", "SharedWorker"].forEach(function (name) {
+    var Native = self[name];
+    if (typeof Native !== "function") {
+      return;
+    }
+    var Wrapped = function (url, options) {
+      return options !== undefined ? new Native(toProxy(url), options) : new Native(toProxy(url));
+    };
+    Wrapped.prototype = Native.prototype;
+    self[name] = Wrapped;
+  });
+
+  var NativeES = self.EventSource;
+  if (typeof NativeES === "function") {
+    var WrappedES = function (url, config) {
+      return config !== undefined ? new NativeES(toProxy(url), config) : new NativeES(toProxy(url));
+    };
+    WrappedES.prototype = NativeES.prototype;
+    WrappedES.CONNECTING = NativeES.CONNECTING;
+    WrappedES.OPEN = NativeES.OPEN;
+    WrappedES.CLOSED = NativeES.CLOSED;
+    self.EventSource = WrappedES;
+  }
+
+  if (self.navigator && typeof self.navigator.sendBeacon === "function") {
+    var _beacon = self.navigator.sendBeacon.bind(self.navigator);
+    self.navigator.sendBeacon = function (url, data) {
+      return data !== undefined ? _beacon(toProxy(url), data) : _beacon(toProxy(url));
+    };
+  }
+
   // --- DOM attributes ---
   var URL_ATTRS = { src: 1, href: 1, action: 1, poster: 1, formaction: 1, "data-src": 1 };
 
@@ -508,6 +600,22 @@
     }
   })();
 
+  // swRefusal builds the rejection handed to a page trying to register its own
+  // service worker. DOMException is constructed only when it exists: a bare
+  // `new DOMException(...)` throws a ReferenceError where it does not, and a
+  // shim that throws synchronously instead of rejecting is worse than no shim —
+  // the page's .catch() never runs and the failure surfaces as a broken promise
+  // chain somewhere unrelated.
+  function swRefusal() {
+    var msg = "service workers are not available through this proxy";
+    if (typeof DOMException === "function") {
+      return new DOMException(msg, "SecurityError");
+    }
+    var err = new Error(msg);
+    err.name = "SecurityError";
+    return err;
+  }
+
   // --- register the service worker (safety net) ---
   // On the very first visit the worker is not controlling this document yet, so
   // early requests the in-page hooks cannot catch — dynamic import(), Worker(),
@@ -519,7 +627,28 @@
   if (self.navigator && self.navigator.serviceWorker) {
     try {
       var swc = self.navigator.serviceWorker;
-      swc.register("/__bumshi__/sw.js", { scope: "/" });
+
+      // A proxied page registering its OWN worker is the one thing that can
+      // take this origin away from us. Every site shares this origin, so a
+      // site's "navigator.serviceWorker.register('/sw.js', {scope: '/'})"
+      // claims the whole proxy, replaces the worker below, and every other tab
+      // loses interception at once.
+      //
+      // It cannot succeed anyway — the script URL resolves to a path that is
+      // not a valid token, so the fetch 404s — but failing as a rejected
+      // promise is much better than failing as a request that hangs: a site
+      // waiting on registration to settle stalls until it times out. Reject
+      // immediately and let the site's own fallback run. Sites that use a
+      // worker for media streaming (Telegram Web) degrade rather than break.
+      var _register = swc.register.bind(swc);
+      swc.register = function (script, options) {
+        if (String(script).indexOf(B.ENGINE) === 0) {
+          return _register(script, options); // our own, below
+        }
+        return Promise.reject(swRefusal());
+      };
+
+      _register("/__bumshi__/sw.js", { scope: "/" });
       if (!swc.controller) {
         var RELOAD_FLAG = "__bumshi_sw_reloaded__";
         swc.addEventListener("controllerchange", function () {

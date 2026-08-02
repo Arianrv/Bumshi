@@ -241,6 +241,12 @@ func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.
 	copyRequestHeaders(outReq.Header, r.Header)
 	setRequestIdentity(outReq, r, target)
 	outReq.Host = target.Host
+	// Carry the body length across explicitly. Go derives Content-Length from
+	// this field and ignores any header of that name, so without it every
+	// proxied POST goes out chunked — which some origins reject outright, and
+	// which is itself a tell, since a browser sends Content-Length for an
+	// ordinary form submission. A -1 (genuinely unknown) stays chunked.
+	outReq.ContentLength = r.ContentLength
 	h.logUpstreamRequest(outReq)
 
 	start := time.Now()
@@ -274,10 +280,12 @@ func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.
 		h.serveRewritten(w, r, resp, target, html, nonce, rc)
 		return
 	}
-	h.copyResponseHeaders(w.Header(), resp.Header, target, nonce)
+	// This body is streamed through untouched, so the upstream Content-Length
+	// still describes it exactly (Go has already removed it if it decompressed
+	// on our behalf). Keeping it is what lets a <video> element seek and show a
+	// duration before the file has finished arriving.
+	h.copyResponseHeaders(w.Header(), resp.Header, target, nonce, !resp.Uncompressed)
 
-	// Stream everything else through unchanged. Content-Length is intentionally
-	// dropped in copyResponseHeaders, so the server frames the response itself.
 	w.WriteHeader(resp.StatusCode)
 	// Push the headers out ahead of the first body byte. Server-sent events and
 	// long-polling deliver nothing for a while, and the client must not be kept
@@ -326,7 +334,9 @@ func (h *Handler) serveRewritten(w http.ResponseWriter, r *http.Request, resp *h
 		if html && h.injectHTML != nil && shouldInject(r) {
 			body = h.injectHTML(body, nonce)
 		}
-		h.copyResponseHeaders(w.Header(), resp.Header, target, nonce)
+		// The bootstrap was injected into the buffered prefix, so the body no
+		// longer matches the upstream length: false.
+		h.copyResponseHeaders(w.Header(), resp.Header, target, nonce, false)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(body)
 		_ = rc.Flush()
@@ -343,7 +353,8 @@ func (h *Handler) serveRewritten(w http.ResponseWriter, r *http.Request, resp *h
 	} else {
 		body = rewrite.CSS(target, body)
 	}
-	h.copyResponseHeaders(w.Header(), resp.Header, target, nonce)
+	// Rewritten body: its own length is set below, so the upstream one is wrong.
+	h.copyResponseHeaders(w.Header(), resp.Header, target, nonce, false)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
@@ -386,10 +397,13 @@ var hopByHop = map[string]bool{
 	"Proxy-Authorization": true,
 }
 
+// copyRequestHeaders copies the allowed client headers upstream. Anything not
+// named in forwardedRequestHeaders is dropped, including headers this code has
+// never heard of.
 func copyRequestHeaders(dst, src http.Header) {
 	for k, vv := range src {
 		ck := http.CanonicalHeaderKey(k)
-		if hopByHop[ck] || deniedRequestHeader[ck] {
+		if !forwardedRequestHeaders[ck] {
 			continue
 		}
 		dst[ck] = append([]string(nil), vv...)
@@ -478,28 +492,80 @@ func registrableDomain(host string) string {
 	return strings.Join(parts[len(parts)-2:], ".")
 }
 
-// deniedRequestHeader lists client headers we refuse to copy verbatim upstream:
-// Accept-Encoding (so Go manages compression and we can rewrite text bodies),
-// Cookie/Referer/Origin (rebuilt to describe the target rather than the proxy —
-// see setRequestIdentity), forwarding headers that would disclose the client's
-// IP, and headers that identify the client as an app rather than a browser.
+// forwardedRequestHeaders is the closed set of client headers copied verbatim
+// to the target. Everything else is dropped.
 //
-// X-Requested-With is the one that bites: Android WebView attaches the host
-// app's package name to every request it makes. Forwarding that announces
-// "com.bumshi.browser" to every site the user visits — it identifies the tool
-// by name, links all of a user's traffic together, and reads to an anti-bot
-// system as an automated client rather than a browser.
-var deniedRequestHeader = map[string]bool{
-	"Accept-Encoding":   true,
-	"Cookie":            true,
-	"Referer":           true,
-	"Origin":            true,
-	"X-Forwarded-For":   true,
-	"X-Forwarded-Host":  true,
-	"X-Forwarded-Proto": true,
-	"X-Real-Ip":         true,
-	"Forwarded":         true,
-	"X-Requested-With":  true,
+// It is an ALLOWLIST, and the direction matters more than the contents. A
+// denylist can only exclude what somebody thought to name, and this service
+// sits behind whatever edge the operator puts in front of it — a CDN adds
+// headers nobody in this repository chose.
+//
+// That is not hypothetical. With Cloudflare in front, every inbound request
+// carries CF-Connecting-IP, which is Cloudflare's copy of the real visitor's
+// address, next to CF-IPCountry, CF-Ray, CF-Visitor, CDN-Loop and Via. The
+// denylist this replaced named X-Forwarded-For, X-Real-Ip and Forwarded but
+// nothing from that family, so all of it went upstream and every site the user
+// visited learned their home IP and country. For users behind national
+// censorship that is the single disclosure this service exists to prevent, and
+// the package doc above promised it could not happen.
+//
+// It is also read as an explicit relay declaration: a request arriving from a
+// datacenter IP that asserts a residential client in another country is an
+// immediate anti-abuse challenge. On Google it is the "unusual traffic"
+// interstitial, whose reCAPTCHA cannot then be solved from a proxied origin.
+//
+// Four absences are deliberate:
+//
+//   - Cookie, Origin and Referer are rebuilt to describe the target rather than
+//     the proxy (see setRequestIdentity), so the raw values must not survive.
+//   - Accept-Encoding is left to Go, so compression is transparent and text
+//     bodies stay rewritable.
+//   - X-Requested-With is dropped because Android WebView fills it with the host
+//     app's package name: forwarding it announces "com.bumshi.browser" to every
+//     site, links a user's traffic together, and reads as an automated client.
+//   - Content-Length is not copied because Go derives it from
+//     Request.ContentLength; serveHTTP sets that field directly instead.
+//
+// Adding to this list is a deliberate act. Before adding a header, ask whether
+// a browser talking to that site directly would send it.
+var forwardedRequestHeaders = headerSet(
+	// Content negotiation.
+	"Accept", "Accept-Language", "Content-Type",
+
+	// Caching and ranged requests (video seeking, resumable downloads).
+	"Cache-Control", "Pragma", "Range",
+	"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "If-Range",
+
+	// The browser's identity, and the fetch metadata that has to stay
+	// consistent with it. Sec-Fetch-Site is overwritten in setRequestIdentity;
+	// the rest describe the request in terms proxying does not change.
+	"User-Agent", "Upgrade-Insecure-Requests",
+	"Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site", "Sec-Fetch-User",
+	"Sec-CH-UA", "Sec-CH-UA-Mobile", "Sec-CH-UA-Platform", "Sec-CH-UA-Platform-Version",
+	"Sec-CH-UA-Arch", "Sec-CH-UA-Bitness", "Sec-CH-UA-Model",
+	"Sec-CH-UA-Full-Version", "Sec-CH-UA-Full-Version-List", "Sec-CH-UA-WoW64",
+
+	// Preferences a browser volunteers. Dropping them is itself an anomaly:
+	// a real Chrome always sends them.
+	"Priority", "DNT", "Sec-GPC", "Sec-CH-Prefers-Color-Scheme",
+
+	// HTTP authentication, for sites that use it.
+	"Authorization",
+)
+
+// headerSet builds a lookup set with canonicalised keys.
+//
+// Canonicalising here rather than trusting the literals is what makes the list
+// safe to edit: Go's canonical form is "Sec-Ch-Ua", not "Sec-CH-UA", and "Dnt",
+// not "DNT". A hand-written key in the wrong case would never match, and
+// because the set is an allowlist the failure is silent — the header is simply
+// dropped, and the only symptom is a site behaving oddly months later.
+func headerSet(names ...string) map[string]bool {
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[http.CanonicalHeaderKey(n)] = true
+	}
+	return m
 }
 
 // controlPlaneHeaders are response headers the service's own middleware sets on
@@ -518,15 +584,33 @@ var controlPlaneHeaders = []string{
 	"Cross-Origin-Resource-Policy",
 }
 
-func (h *Handler) copyResponseHeaders(dst, src http.Header, base *url.URL, nonce string) {
+// copyResponseHeaders stages the upstream response headers on dst.
+//
+// keepLength says whether the body reaches the client byte-for-byte, in which
+// case the upstream Content-Length is still true and worth forwarding. It is
+// false wherever the body is rewritten or only partly buffered.
+func (h *Handler) copyResponseHeaders(dst, src http.Header, base *url.URL, nonce string, keepLength bool) {
 	for _, k := range controlPlaneHeaders {
 		dst.Del(k)
 	}
 	for k, vv := range src {
 		ck := http.CanonicalHeaderKey(k)
 		switch ck {
-		case "Content-Length", "Content-Encoding":
-			// Body may be transformed or was transparently decompressed.
+		case "Content-Length":
+			// Forwarded only for an untouched body. Length matters most for the
+			// case that needs it most: without it the response is framed as
+			// chunked, and a media element cannot report a duration or seek
+			// until the whole file has arrived — progressive <video> playback
+			// degrades into download-then-play.
+			//
+			// Go deletes this header itself when it transparently decompressed
+			// the body, so a value surviving here describes the bytes we are
+			// about to write.
+			if !keepLength {
+				continue
+			}
+		case "Content-Encoding":
+			// Go decompressed transparently, or we rewrote the body.
 			continue
 		case "Location", "Content-Location":
 			dst.Set(ck, link.Resolve(base, src.Get(ck)))

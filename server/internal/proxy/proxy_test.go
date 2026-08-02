@@ -134,6 +134,103 @@ func TestAppIdentifyingHeadersAreNotForwarded(t *testing.T) {
 	}
 }
 
+// TestEdgeHeadersDoNotLeakClientIdentity is the regression test for the worst
+// bug this package has had.
+//
+// Deployed behind Cloudflare, every inbound request arrives carrying
+// CF-Connecting-IP — the real visitor's address — plus CF-IPCountry, CF-Ray,
+// CF-Visitor, CDN-Loop and Via. The header filter used to be a denylist naming
+// X-Forwarded-For and X-Real-Ip, so none of those were caught and all of them
+// were forwarded: every site a user visited was told their home IP and country,
+// which is precisely the disclosure this service exists to prevent, and which
+// reads to any anti-abuse system as a request announcing itself as a relay.
+//
+// The unknown-header case at the end is the point of the whole test. The filter
+// is an allowlist so that an edge nobody here anticipated cannot leak by
+// default; a denylist would pass X-Some-Future-Cdn-Client-Ip silently.
+func TestEdgeHeadersDoNotLeakClientIdentity(t *testing.T) {
+	var got http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	defer upstream.Close()
+
+	const clientIP = "5.22.10.77" // stand-in for a user's real address
+
+	// Headers that carry the client's own address. The last one is invented:
+	// no denylist could contain it, which is the argument for an allowlist.
+	carriesIP := []string{
+		"Cf-Connecting-Ip", "True-Client-Ip", "Fastly-Client-Ip", "X-Client-Ip",
+		"X-Forwarded-For", "X-Real-Ip", "X-Some-Future-Cdn-Client-Ip",
+	}
+	// Headers that disclose the relay rather than the client. On their own they
+	// are enough to mark the request as proxied.
+	disclosesRelay := []string{
+		"Cf-Ipcountry", "Cf-Ray", "Cf-Visitor", "Cdn-Loop", "Via",
+		"X-Forwarded-Host", "X-Forwarded-Proto",
+	}
+
+	h := newTestHandler(upstream.Client())
+	req := httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/page"), nil)
+	for _, k := range carriesIP {
+		req.Header.Set(k, clientIP)
+	}
+	for _, k := range disclosesRelay {
+		req.Header.Set(k, "cloudflare")
+	}
+	req.Header.Set("Forwarded", "for="+clientIP)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 14) Chrome/120")
+	req.Header.Set("Accept", "text/html")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	for _, k := range append(append([]string{"Forwarded"}, carriesIP...), disclosesRelay...) {
+		if v := got.Get(k); v != "" {
+			t.Errorf("%s leaked upstream: %q", k, v)
+		}
+	}
+	// Belt and braces: the address must not appear under any header at all,
+	// including one this test did not think to name.
+	for k, vv := range got {
+		for _, v := range vv {
+			if strings.Contains(v, clientIP) {
+				t.Errorf("client IP leaked in %s: %q", k, v)
+			}
+		}
+	}
+	// The allowlist must not have thrown out the baby with the bathwater.
+	if got.Get("User-Agent") == "" || got.Get("Accept") == "" {
+		t.Errorf("real browser headers were dropped: %v", got)
+	}
+}
+
+// TestPostCarriesContentLength guards the transfer encoding of proxied uploads.
+// Go derives Content-Length from Request.ContentLength and ignores a header of
+// that name, so without the explicit assignment in serveHTTP every POST goes
+// out chunked — rejected by some origins, and a tell to the rest.
+func TestPostCarriesContentLength(t *testing.T) {
+	var gotLen int64
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLen = r.ContentLength
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+	}))
+	defer upstream.Close()
+
+	body := "user=alice&pass=hunter2"
+	h := newTestHandler(upstream.Client())
+	req := httptest.NewRequest("POST", link.EncodeString(upstream.URL+"/login"), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if gotBody != body {
+		t.Errorf("body = %q, want %q", gotBody, body)
+	}
+	if gotLen != int64(len(body)) {
+		t.Errorf("upstream ContentLength = %d, want %d (request went out chunked)", gotLen, len(body))
+	}
+}
+
 func TestSecFetchSiteIsRecomputedForTheTarget(t *testing.T) {
 	// The browser computes Sec-Fetch-Site against the proxy origin, where every
 	// target looks same-origin. Forwarded unchanged next to a real Referer that

@@ -29,8 +29,15 @@ Thumbs.db
 node_modules/
 dist-ssr/
 
-# Private design/planning doc — kept local, not shipped in the public repo
+# Private notes — kept local, never shipped in the public repo.
+#
+# Anything describing how the apps are built or signed, or cataloguing live
+# weaknesses in a running instance, belongs here rather than on GitHub. The
+# audience for this repository includes people who would like to find those
+# weaknesses before they are fixed.
 DESIGN.md
+DIAGNOSIS.md
+vps-diagnose.sh
 
 # Companion browser apps — kept private; distributed as prebuilt binaries only.
 # NEVER commit these, and never override with `git add -f`. See CLAUDE.md.

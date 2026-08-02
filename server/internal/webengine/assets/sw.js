@@ -93,8 +93,37 @@ async function buildRequest(target, req) {
     headers: req.headers,
     credentials: "include",
     redirect: "follow",
-    referrerPolicy: "no-referrer",
+    // "unsafe-url" keeps the full referrer PATH, and the path is the payload:
+    // it is "/p/<token>", which the server decodes back into the real page the
+    // request came from (see setRequestIdentity). A policy that trims the
+    // referrer to its origin would leave only "https://<proxy>/", which decodes
+    // to nothing.
+    //
+    // It is not unsafe here. The referrer never leaves this origin — the server
+    // reads it, rewrites it into the target's own URL, and never forwards the
+    // proxy's.
+    //
+    // This used to be "no-referrer", which stripped it entirely. Everything the
+    // worker intercepts is most of the page, so most requests reached the
+    // server with no referrer to decode: it then sent none upstream and
+    // computed Sec-Fetch-Site: none — an assertion that the user typed the URL
+    // into the address bar, attached to a subresource inside a document. That
+    // combination cannot occur in a browser. It also breaks every CDN that
+    // checks the referrer for hotlinking (images and video, mainly) and undoes
+    // the sign-in fix for anything the worker handles.
+    referrerPolicy: "unsafe-url",
   };
+  // Only same-origin referrers may be set here, which is exactly what a proxied
+  // document's URL is. Anything else is left to the default.
+  if (req.referrer && req.referrer !== "about:client") {
+    try {
+      if (new URL(req.referrer).origin === self.location.origin) {
+        init.referrer = req.referrer;
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  }
   if (req.method !== "GET" && req.method !== "HEAD") {
     // Buffer rather than stream the body. Request streams (body + duplex:
     // "half") are Chromium-only, so streaming here made every intercepted POST

@@ -85,6 +85,22 @@ function boot(target = TARGET) {
   ctx.navigator = { userAgent: "node" };
   ctx.addEventListener = () => {};
 
+  // A History that records what the page asked for, so a test can assert the
+  // address the browser would actually end up showing.
+  ctx.historyCalls = [];
+  ctx.history = {
+    pushState(state, title, url) {
+      ctx.historyCalls.push(["pushState", url]);
+    },
+    replaceState(state, title, url) {
+      ctx.historyCalls.push(["replaceState", url]);
+    },
+  };
+  ctx.openCalls = [];
+  ctx.open = (url) => {
+    ctx.openCalls.push(url);
+  };
+
   const backing = { local: new Storage(), session: new Storage(), doc: new Document() };
   ctx.document = backing.doc;
   ctx.localStorage = backing.local;
@@ -237,4 +253,84 @@ test("cookie: a page sees only its own cookies, under real names", () => {
   backing.doc.jar.set(GOOGLE_D + "NID", "mine");
   backing.doc.jar.set("b_ffffffffffffffffd_SESSION", "someone else's");
   assert.equal(ctx.document.cookie, "NID=mine");
+});
+
+// --- navigation hooks ---
+//
+// pushState is the escape nothing downstream can catch: it makes no network
+// request, so the service worker and the host app never see it. If the address
+// leaves "/p/", a reload 404s and realBase() stops decoding — every relative
+// URL on the page then resolves against the proxy instead of the site.
+
+/** The real URL a proxy path points at, or null. */
+function decoded(ctx, proxyUrl) {
+  const p = new URL(proxyUrl, "https://vps.example").pathname;
+  return ctx.__bumshi.decodeProxied(p);
+}
+
+test("history: pushState keeps the address inside the proxy scheme", () => {
+  const { ctx } = boot("https://www.youtube.com/watch?v=abc");
+  ctx.history.pushState({}, "", "/watch?v=next");
+
+  const [, url] = ctx.historyCalls[0];
+  assert.equal(decoded(ctx, url), "https://www.youtube.com/watch?v=next");
+});
+
+test("history: replaceState resolves relative paths against the real site", () => {
+  const { ctx } = boot("https://web.telegram.org/k/");
+  ctx.history.replaceState(null, "", "settings");
+
+  const [, url] = ctx.historyCalls[0];
+  assert.equal(decoded(ctx, url), "https://web.telegram.org/k/settings");
+});
+
+test("history: an absolute cross-origin URL is proxied too", () => {
+  const { ctx } = boot("https://www.google.com/search?q=x");
+  ctx.history.pushState(null, "", "https://mail.google.com/inbox");
+
+  const [, url] = ctx.historyCalls[0];
+  assert.equal(decoded(ctx, url), "https://mail.google.com/inbox");
+});
+
+test("history: an omitted URL is left omitted, not invented", () => {
+  const { ctx } = boot();
+  ctx.history.pushState({ a: 1 }, "");
+  assert.deepEqual(ctx.historyCalls[0], ["pushState", undefined]);
+});
+
+test("history: an already-proxied URL is not wrapped twice", () => {
+  const { ctx } = boot("https://www.youtube.com/watch?v=abc");
+  const once = "/p/" + ctx.__bumshi.encode("https://www.youtube.com/feed");
+  ctx.history.pushState(null, "", once);
+
+  const [, url] = ctx.historyCalls[0];
+  assert.equal(decoded(ctx, url), "https://www.youtube.com/feed");
+});
+
+test("window.open is routed through the proxy", () => {
+  const { ctx } = boot("https://www.google.com/search?q=x");
+  ctx.open("https://example.com/popup");
+  assert.equal(decoded(ctx, ctx.openCalls[0]), "https://example.com/popup");
+});
+
+test("a page cannot register its own service worker over ours", async () => {
+  const registered = [];
+  const { ctx } = boot();
+  ctx.navigator.serviceWorker = {
+    controller: {},
+    register: (script, opts) => {
+      registered.push(script);
+      return Promise.resolve({});
+    },
+    addEventListener() {},
+  };
+  // Re-run client.js so the hook installs over this stand-in.
+  vm.runInContext(fs.readFileSync(path.join(dir, "client.js"), "utf8"), ctx, { filename: "client.js" });
+
+  await assert.rejects(() => ctx.navigator.serviceWorker.register("/sw.js", { scope: "/" }));
+  assert.ok(
+    !registered.includes("/sw.js"),
+    "the page's worker must never reach the real register(): it would claim scope / and evict ours",
+  );
+  assert.ok(registered.includes("/__bumshi__/sw.js"), "our own worker must still register");
 });

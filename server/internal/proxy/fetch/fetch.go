@@ -35,10 +35,28 @@ func NewClient(responseHeaderTimeout time.Duration, forceIPv4 bool) *http.Client
 		}
 	}
 	transport := &http.Transport{
-		DialContext:           dialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   4,
+		DialContext:       dialContext,
+		ForceAttemptHTTP2: true,
+		// Sized for streaming media, which is what actually stresses this pool.
+		//
+		// A DASH or HLS player does not make one request per video; it makes a
+		// steady stream of small ranged requests, several in flight at once, all
+		// to the same CDN host — and every user watching does the same. The
+		// previous per-host idle cap of 4 meant that beyond the fourth
+		// connection each finished request was closed rather than returned to
+		// the pool, so the next segment paid a fresh TCP and TLS handshake. On a
+		// link to Iran that is a round trip measured in hundreds of
+		// milliseconds, repeated every few seconds of playback: it shows up as
+		// stalling that looks like bandwidth but is not.
+		//
+		// MaxConnsPerHost is deliberately left unset (unlimited). Capping it
+		// would block requests rather than open connections, converting a
+		// throughput problem into a stall.
+		MaxIdleConns:        512,
+		MaxIdleConnsPerHost: 64,
+		// 4 KiB (the default) is a lot of syscalls at video bitrates.
+		WriteBufferSize:       64 << 10,
+		ReadBufferSize:        64 << 10,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
