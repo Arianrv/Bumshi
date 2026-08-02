@@ -84,22 +84,26 @@ type Options struct {
 	// LogUpstreamHost, when non-empty, logs the full header set of every
 	// upstream request whose host contains it. Diagnostic only; see debug.go.
 	LogUpstreamHost string
+	// BlockTelemetry answers known analytics beacons locally with 204 instead of
+	// forwarding them. See telemetry.go. Defaults on via New.
+	BlockTelemetry *bool
 }
 
 // Handler is the proxy HTTP handler. Mount it under link.Prefix ("/p/").
 type Handler struct {
-	client       *http.Client
-	logger       *slog.Logger
-	col          *Collectors
-	rewriteMax   int64
-	injectHTML   func(body []byte, nonce string) []byte
-	enabled      func() bool
-	forceIPv4    bool
-	requireToken bool
-	authorized   func(string) bool
-	secure       bool
-	selfHosts    []string
-	logUpstream  string
+	client         *http.Client
+	logger         *slog.Logger
+	col            *Collectors
+	rewriteMax     int64
+	injectHTML     func(body []byte, nonce string) []byte
+	enabled        func() bool
+	forceIPv4      bool
+	requireToken   bool
+	authorized     func(string) bool
+	secure         bool
+	selfHosts      []string
+	logUpstream    string
+	blockTelemetry bool
 }
 
 // New builds a Handler from opts.
@@ -112,19 +116,27 @@ func New(opts Options) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// On unless the operator says otherwise: the traffic it removes is traffic
+	// no user asked for, and leaving it on by default is what keeps the shared
+	// exit IP under an anti-abuse threshold.
+	blockTelemetry := true
+	if opts.BlockTelemetry != nil {
+		blockTelemetry = *opts.BlockTelemetry
+	}
 	return &Handler{
-		client:       opts.Client,
-		logger:       logger,
-		col:          opts.Collectors,
-		rewriteMax:   max,
-		injectHTML:   opts.InjectHTML,
-		enabled:      opts.Enabled,
-		forceIPv4:    opts.ForceIPv4,
-		requireToken: opts.RequireToken,
-		authorized:   opts.Authorized,
-		secure:       opts.SecureCookies,
-		selfHosts:    normalizeHosts(opts.SelfHosts),
-		logUpstream:  strings.ToLower(opts.LogUpstreamHost),
+		client:         opts.Client,
+		logger:         logger,
+		col:            opts.Collectors,
+		rewriteMax:     max,
+		injectHTML:     opts.InjectHTML,
+		enabled:        opts.Enabled,
+		forceIPv4:      opts.ForceIPv4,
+		requireToken:   opts.RequireToken,
+		authorized:     opts.Authorized,
+		secure:         opts.SecureCookies,
+		selfHosts:      normalizeHosts(opts.SelfHosts),
+		logUpstream:    strings.ToLower(opts.LogUpstreamHost),
+		blockTelemetry: blockTelemetry,
 	}
 }
 
@@ -186,6 +198,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//
 	// Errors are ignored on purpose: a ResponseWriter that cannot carry
 	// deadlines (an httptest recorder, say) simply keeps the default behaviour.
+	// Answer telemetry beacons here instead of forwarding them. About two fifths
+	// of the requests a Google search generates are these, and every one spends
+	// the shared exit IP's request budget, crosses the international link twice,
+	// and hands a behavioural record to an advertising network. See telemetry.go
+	// for why this is safe and where the line is drawn.
+	if h.blockTelemetry && isTelemetrySink(target) {
+		h.serveTelemetry(w, r)
+		return
+	}
+
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Time{})
 	_ = rc.SetWriteDeadline(time.Time{})
@@ -504,10 +526,20 @@ func setFetchMetadata(out, in *http.Request, target *url.URL, referer string) {
 		return
 	}
 	site := secFetchSite(referer, target)
-	// With no Referer to go on, secFetchSite says "none" — but an Origin is
-	// itself an initiator, and the one we send upstream is the target's own
-	// (see above), so the truthful answer there is same-origin. Saying "none"
-	// beside an Origin header contradicts it outright.
+	// "none" means the request had no initiator at all: the user typed it, or
+	// picked a bookmark. Only a navigation can claim that. Every subresource,
+	// fetch and XHR was started by a document, so pairing "none" with any other
+	// mode — or with an Origin header, which names the initiator outright — is a
+	// contradiction the site can check for free.
+	//
+	// secFetchSite falls back to "none" whenever there is no Referer to reason
+	// from, which is common here: the referrer may have been stripped by the
+	// page's own policy long before it reached us. In that case the honest
+	// reconstruction is same-origin, since the document doing the fetching is,
+	// after proxying, the same site as the target far more often than not.
+	if site == "none" && !strings.EqualFold(in.Header.Get("Sec-Fetch-Mode"), "navigate") {
+		site = "same-origin"
+	}
 	if site == "none" && in.Header.Get("Origin") != "" {
 		site = "same-origin"
 	}
@@ -597,6 +629,14 @@ var deniedRequestHeader = headerSet(
 
 	// The relay itself, disclosed without naming the client.
 	"Forwarded", "Via", "CDN-Loop",
+
+	// Added by a TLS-terminating front end (Caddy, and every CDN) when the
+	// request arrived in TLS early data, so the origin can decide whether to
+	// risk a replay — RFC 8470. It describes the hop between the user and this
+	// server, which the target has no business knowing about, and no browser
+	// ever sends it: seeing it means "something terminated TLS in front of the
+	// client", which is precisely what we are not advertising.
+	"Early-Data",
 )
 
 // deniedRequestHeaderPrefixes are vendor namespaces whose whole purpose is to

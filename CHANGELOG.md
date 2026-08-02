@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Analytics beacons are answered locally instead of forwarded.** Loading one
+  Google search page fires around eighty requests at google.com, of which about
+  thirty are `/gen_204`, `/client_204`, `jserror` and `play.google.com/log` —
+  reports the page sends and never reads. Forwarding them spent four things for
+  nothing: the shared exit IP's request budget, which is what an anti-abuse
+  system counts and what earns the "unusual traffic" interstitial after a few
+  minutes of ordinary browsing; bandwidth, twice, across an international link;
+  latency, competing with content for connections; and the users' behavioural
+  record, handed to an advertising network by a tool whose purpose is the
+  opposite. They now get the 204 they expect. The rule that keeps this safe is
+  **block sinks, never scripts** — an endpoint built to receive data can always
+  be answered, while a library a page waits on cannot, and blocking those is how
+  ad blockers produce blank pages. Off via `BlockTelemetry`.
+
 ### Fixed
 - **The runtime was never injected into the app's own page loads.** Android
   WebView labels a programmatic `loadUrl()` navigation `Sec-Fetch-Dest: empty`,
