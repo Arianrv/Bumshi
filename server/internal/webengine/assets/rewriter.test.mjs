@@ -85,3 +85,55 @@ test("a target site's own /p/ path is still proxied", () => {
   const got = B.rewriteRequestURL(PROXY, clientUrl, PROXY + "/p/product/123");
   assert.equal(got, PROXY + "/p/" + B.encode("https://shop.example/p/product/123"));
 });
+
+// --- ES module recovery ---
+//
+// Because the target sits in the PATH, the browser's own module resolver
+// destroys the token: "./lang.js" imported from "/p/<token of .../k/index.js>"
+// becomes "/p/lang.js". No JavaScript hook can intercept a module specifier, so
+// the service worker is the only place this can be repaired — and the tail
+// after the prefix is exactly the specifier, already resolved against the
+// importing file's directory.
+
+const MOD = "https://web.telegram.org/k/index-COc_Pe9u.js";
+const DOC = "https://web.telegram.org/k/";
+
+test("module: a relative import is recovered against the importing file", () => {
+  const B = load(["codec.js", "rewriter.js"]);
+  // What the browser actually asks for after mangling "./lang-R0uxlNrr.js".
+  const out = B.rewriteRequestURL(PROXY, PROXY + "/p/" + B.encode(MOD), PROXY + "/p/lang-R0uxlNrr.js", "script");
+  assert.equal(out, PROXY + "/p/" + B.encode("https://web.telegram.org/k/lang-R0uxlNrr.js"));
+});
+
+test("module: a nested relative import keeps its directory", () => {
+  const B = load(["codec.js", "rewriter.js"]);
+  const out = B.rewriteRequestURL(PROXY, PROXY + "/p/" + B.encode(MOD), PROXY + "/p/chunks/deep.js", "script");
+  assert.equal(out, PROXY + "/p/" + B.encode("https://web.telegram.org/k/chunks/deep.js"));
+});
+
+test("module: a worker URL built from import.meta.url is recovered", () => {
+  const B = load(["codec.js", "rewriter.js"]);
+  const out = B.rewriteRequestURL(PROXY, PROXY + "/p/" + B.encode(MOD), PROXY + "/p/webp.worker-BhH2.js", "worker");
+  assert.equal(out, PROXY + "/p/" + B.encode("https://web.telegram.org/k/webp.worker-BhH2.js"));
+});
+
+test("module: recovery never touches a non-module request", () => {
+  // A target site's own "/p/product/123" has the same shape as the wreckage and
+  // must survive. It arrives as a document, an image or a plain fetch — never
+  // as a script — which is what makes the two separable at all.
+  const B = load(["codec.js", "rewriter.js"]);
+  for (const dest of ["document", "image", "", "style", undefined]) {
+    const out = B.rewriteRequestURL(PROXY, PROXY + "/p/" + B.encode(DOC), PROXY + "/p/product/123", dest);
+    assert.equal(
+      out,
+      PROXY + "/p/" + B.encode("https://web.telegram.org/p/product/123"),
+      `destination ${dest || "(empty)"} must not be treated as module wreckage`,
+    );
+  }
+});
+
+test("module: a still-valid token is left alone even on a script request", () => {
+  const B = load(["codec.js", "rewriter.js"]);
+  const good = PROXY + "/p/" + B.encode("https://web.telegram.org/k/real.js");
+  assert.equal(B.rewriteRequestURL(PROXY, PROXY + "/p/" + B.encode(MOD), good, "script"), good);
+});

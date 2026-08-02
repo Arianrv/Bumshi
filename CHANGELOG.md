@@ -7,6 +7,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **The runtime was never injected into the app's own page loads.** Android
+  WebView labels a programmatic `loadUrl()` navigation `Sec-Fetch-Dest: empty`,
+  and `shouldInject` read that as "this is an XHR fragment, do not inject" — so
+  every page opened from the address bar was served with no `client.js` at all:
+  no URL hooks, no cookie or storage shim, no History patch, and no service
+  worker ever registered. The mode is now checked first, because a request whose
+  `Sec-Fetch-Mode` is `navigate` is a document whatever its destination claims.
+- **Fetch metadata no longer contradicts itself.** These headers are
+  cross-checked against each other and against `Origin` and `Referer`, and a
+  combination no browser can emit is a cheaper and more reliable bot signal than
+  any TLS fingerprint. Two were being sent on essentially every request:
+  `Sec-Fetch-Dest: empty` beside `Sec-Fetch-Mode: navigate` (a top-level
+  navigation claiming the destination of a `fetch()`), and `Sec-Fetch-Site: none`
+  beside an `Origin` header (a request declaring it had no initiator while
+  naming its initiator). Both are now reconciled against the target. Measurement
+  first: the same VPS answered thirty Google searches across plain curl,
+  curl-impersonate and the proxy's own Go client without a single challenge, so
+  neither the datacenter IP nor Go's TLS fingerprint was responsible — it was
+  what the app's requests said about themselves.
+- **The app no longer advertises the device or the WebView.** The User-Agent was
+  left at the system default, which on an emulator reads
+  `Android SDK built for arm64 … ; wv` — "not a real phone" and "not a real
+  browser" in one string — and on a handset still carries the model name and the
+  `wv` token. Both modes now send a fixed, plausible Chrome UA; fixed matters as
+  much as plausible, since a shared string is one fewer axis to tell users apart
+  by.
 - **Single-page apps no longer navigate themselves out of the proxy.** A site
   rewriting its own address with `history.pushState(state, "", "/watch?v=x")`
   had that resolved against the document URL — `/p/<token>` — so the address
@@ -23,6 +49,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   HTML spec marks the whole interface `[LegacyUnforgeable]`. Same-origin
   navigations through them are still caught by the service worker; a scripted
   navigation to an absolute foreign URL has to be re-wrapped by the host app.
+- **ES-module sites load.** Because the target sits in the path, the browser's
+  own module resolver destroyed the token: `import("./lang-xyz.js")` from
+  `/p/<token of …/k/index-abc.js>` became `/p/lang-xyz.js`, which decodes to
+  nothing. No JavaScript hook can intercept a module specifier, so the service
+  worker is the only place to repair it — and the tail after the prefix turns
+  out to be exactly the specifier, already resolved against the importing
+  file's directory, so re-resolving it against that file's real URL
+  reconstructs the target. The worker now also prefers the **referrer** over
+  the document as its base, which is what a module specifier, a stylesheet's
+  `url()` and an `@import` all actually resolve against. This is what left
+  `web.telegram.org` (a Vite build with 17 relative dynamic imports) rendering
+  a blank page. Recovery is restricted to module-like destinations, because a
+  target site's own `/p/product/123` has the same shape and must survive.
 - **A proxied page can no longer take the origin away from the runtime.** Every
   site shares one origin, so a site registering its own service worker at scope
   `/` would replace Bumshi's and strip interception from every open tab at once.
@@ -97,8 +136,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Google's "unusual traffic" interstitial. The filter is now an **allowlist**:
   only headers a browser legitimately sends are forwarded, so an edge nobody
   anticipated cannot leak by default. `internal/proxy.TestEdgeHeadersDoNotLeakClientIdentity`
-  covers it, including a header invented for the test that no denylist could
-  have contained.
+  covers it, matching the relay families by exact name **and by prefix**, since
+  `CF-*` is an open-ended namespace and naming its members one at a time is how
+  the leak happened. `TestPageHeadersSurvive` guards the other half: a page's
+  own `X-CSRF-Token`, API key or GraphQL header must still reach the site. An
+  allowlist was tried first and was wrong — only browser-generated headers can
+  be enumerated, so it silently dropped every header a site's JavaScript sets,
+  breaking sign-in and XHR on sites nobody thought to test.
 - **Streaming media plays properly.** Three things were working against it. The
   upstream `Content-Length` was dropped from every response including untouched
   byte streams, so media arrived chunked and a `<video>` element could neither

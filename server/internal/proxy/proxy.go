@@ -368,8 +368,18 @@ func (h *Handler) serveRewritten(w http.ResponseWriter, r *http.Request, resp *h
 // browser's own Sec-Fetch-Dest signal: inject for documents and frames, never
 // for fetch/XHR. An absent header means a client that does not send it (or a
 // non-browser), where assuming "document" preserves the previous behaviour.
+//
+// The mode is checked FIRST because the destination cannot always be trusted.
+// Android WebView labels a programmatic loadUrl() navigation
+// "Sec-Fetch-Dest: empty", which reads here as "an XHR, do not inject" — so
+// every page the app opened got no runtime at all: no URL hooks, no cookie or
+// storage shim, no service-worker registration. A request whose mode is
+// "navigate" is a document whatever its destination claims.
 func shouldInject(r *http.Request) bool {
-	switch r.Header.Get("Sec-Fetch-Dest") {
+	if strings.EqualFold(r.Header.Get("Sec-Fetch-Mode"), "navigate") {
+		return true
+	}
+	switch strings.ToLower(r.Header.Get("Sec-Fetch-Dest")) {
 	case "", "document", "iframe", "frame", "embed", "object":
 		return true
 	default:
@@ -397,17 +407,27 @@ var hopByHop = map[string]bool{
 	"Proxy-Authorization": true,
 }
 
-// copyRequestHeaders copies the allowed client headers upstream. Anything not
-// named in forwardedRequestHeaders is dropped, including headers this code has
-// never heard of.
+// copyRequestHeaders copies client headers upstream, dropping the ones that
+// describe the relay rather than the request.
 func copyRequestHeaders(dst, src http.Header) {
 	for k, vv := range src {
 		ck := http.CanonicalHeaderKey(k)
-		if !forwardedRequestHeaders[ck] {
+		if hopByHop[ck] || deniedRequestHeader[ck] || deniedByPrefix(ck) {
 			continue
 		}
 		dst[ck] = append([]string(nil), vv...)
 	}
+}
+
+// deniedByPrefix reports whether a header belongs to a vendor namespace that
+// exists to describe the request's path through an edge.
+func deniedByPrefix(canonical string) bool {
+	for _, p := range deniedRequestHeaderPrefixes {
+		if len(canonical) > len(p) && strings.EqualFold(canonical[:len(p)], p) {
+			return true
+		}
+	}
+	return false
 }
 
 // setRequestIdentity fills in the three headers that describe who is asking:
@@ -446,16 +466,52 @@ func setRequestIdentity(out, in *http.Request, target *url.URL) {
 		}
 	}
 
-	// Sec-Fetch-Site describes the same relationship the Referer does, and the
-	// browser computed it against the PROXY origin — where every target is
-	// "same-origin", because they all are. Forwarding it unchanged alongside a
-	// real Referer emits combinations that cannot occur in a browser: a request
-	// to gstatic.com, refered from google.com, asserting same-origin. That
-	// contradiction is trivial for an anti-abuse system to spot, and we only
-	// started emitting it once the Referer became real.
-	if in.Header.Get("Sec-Fetch-Site") != "" {
-		out.Header.Set("Sec-Fetch-Site", secFetchSite(referer, target))
+	setFetchMetadata(out, in, target, referer)
+}
+
+// setFetchMetadata rewrites the Sec-Fetch-* set so it describes the target
+// coherently.
+//
+// These four headers are cross-checked against each other and against Origin
+// and Referer, and a combination no browser can produce is a cheap, reliable
+// bot signal — cheaper for the site to evaluate than any TLS fingerprint. The
+// proxy was emitting two such combinations on essentially every request:
+//
+//	Sec-Fetch-Dest: empty     with  Sec-Fetch-Mode: navigate
+//	Sec-Fetch-Site: none      with  Origin: https://www.google.com
+//
+// The first is a top-level navigation claiming the destination of a fetch().
+// It comes from Android WebView, which labels a programmatic loadUrl() that
+// way; a real navigation is "document". The second says the request had no
+// initiator while carrying the header that names its initiator. Both are
+// impossible, both were sent to Google on every page load and every XHR, and
+// together they are a far louder signal than the datacenter IP we spent so
+// long suspecting.
+func setFetchMetadata(out, in *http.Request, target *url.URL, referer string) {
+	if in.Header.Get("Sec-Fetch-Mode") == "" && in.Header.Get("Sec-Fetch-Dest") == "" {
+		return // a client that does not speak fetch metadata; invent nothing
 	}
+
+	// A navigation's destination is a document. Anything else paired with
+	// "navigate" is a contradiction, so trust the mode and correct the dest.
+	if strings.EqualFold(in.Header.Get("Sec-Fetch-Mode"), "navigate") {
+		if d := in.Header.Get("Sec-Fetch-Dest"); d == "" || strings.EqualFold(d, "empty") {
+			out.Header.Set("Sec-Fetch-Dest", "document")
+		}
+	}
+
+	if in.Header.Get("Sec-Fetch-Site") == "" {
+		return
+	}
+	site := secFetchSite(referer, target)
+	// With no Referer to go on, secFetchSite says "none" — but an Origin is
+	// itself an initiator, and the one we send upstream is the target's own
+	// (see above), so the truthful answer there is same-origin. Saying "none"
+	// beside an Origin header contradicts it outright.
+	if site == "none" && in.Header.Get("Origin") != "" {
+		site = "same-origin"
+	}
+	out.Header.Set("Sec-Fetch-Site", site)
 }
 
 // secFetchSite recomputes the request's site relationship in the target's terms.
@@ -492,66 +548,74 @@ func registrableDomain(host string) string {
 	return strings.Join(parts[len(parts)-2:], ".")
 }
 
-// forwardedRequestHeaders is the closed set of client headers copied verbatim
-// to the target. Everything else is dropped.
+// deniedRequestHeader lists client headers refused upstream by exact name.
 //
-// It is an ALLOWLIST, and the direction matters more than the contents. A
-// denylist can only exclude what somebody thought to name, and this service
-// sits behind whatever edge the operator puts in front of it — a CDN adds
-// headers nobody in this repository chose.
+// The header that motivated all of this is CF-Connecting-IP. With Cloudflare in
+// front, every inbound request carries it — Cloudflare's copy of the real
+// visitor's address — beside CF-IPCountry, CF-Ray, CF-Visitor, CDN-Loop and
+// Via. The original denylist named X-Forwarded-For, X-Real-IP and Forwarded and
+// nothing from that family, so all of it went upstream: every site a user
+// visited was told their home address and country, which is the one disclosure
+// this service exists to prevent and which the package doc above promised was
+// impossible. It also reads as an explicit relay declaration — a datacenter
+// source IP asserting a residential client in another country — which is enough
+// on its own to earn an anti-abuse challenge.
 //
-// That is not hypothetical. With Cloudflare in front, every inbound request
-// carries CF-Connecting-IP, which is Cloudflare's copy of the real visitor's
-// address, next to CF-IPCountry, CF-Ray, CF-Visitor, CDN-Loop and Via. The
-// denylist this replaced named X-Forwarded-For, X-Real-Ip and Forwarded but
-// nothing from that family, so all of it went upstream and every site the user
-// visited learned their home IP and country. For users behind national
-// censorship that is the single disclosure this service exists to prevent, and
-// the package doc above promised it could not happen.
+// This was briefly an allowlist instead, which closed the leak and broke the
+// web. Only headers a BROWSER generates can be enumerated; the ones a page's
+// own JavaScript sets cannot. X-CSRF-Token, an API key, a GraphQL client
+// header, a version stamp — every one of those is site-specific and arbitrary,
+// and an allowlist silently drops all of them, so sign-in and every XHR quietly
+// stops working on sites nobody thought to test. The exposure a denylist leaves
+// is a header from an edge nobody anticipated; the exposure an allowlist leaves
+// is most of the web. Hence: deny the relay families, by exact name here and by
+// prefix below, and pass the rest.
 //
-// It is also read as an explicit relay declaration: a request arriving from a
-// datacenter IP that asserts a residential client in another country is an
-// immediate anti-abuse challenge. On Google it is the "unusual traffic"
-// interstitial, whose reCAPTCHA cannot then be solved from a proxied origin.
+// Strip the same set at the edge too (Caddy `header_up -CF-Connecting-IP`), so
+// a leak needs two failures rather than one.
 //
-// Four absences are deliberate:
-//
-//   - Cookie, Origin and Referer are rebuilt to describe the target rather than
-//     the proxy (see setRequestIdentity), so the raw values must not survive.
-//   - Accept-Encoding is left to Go, so compression is transparent and text
-//     bodies stay rewritable.
-//   - X-Requested-With is dropped because Android WebView fills it with the host
-//     app's package name: forwarding it announces "com.bumshi.browser" to every
-//     site, links a user's traffic together, and reads as an automated client.
-//   - Content-Length is not copied because Go derives it from
-//     Request.ContentLength; serveHTTP sets that field directly instead.
-//
-// Adding to this list is a deliberate act. Before adding a header, ask whether
-// a browser talking to that site directly would send it.
-var forwardedRequestHeaders = headerSet(
-	// Content negotiation.
-	"Accept", "Accept-Language", "Content-Type",
+// Content-Length is absent because Go derives it from Request.ContentLength;
+// serveHTTP assigns that field directly instead.
+var deniedRequestHeader = headerSet(
+	// Rebuilt to describe the target rather than the proxy. See
+	// setRequestIdentity; the raw values must not survive.
+	"Cookie", "Origin", "Referer",
 
-	// Caching and ranged requests (video seeking, resumable downloads).
-	"Cache-Control", "Pragma", "Range",
-	"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "If-Range",
+	// Left to Go, so compression is transparent and text bodies stay
+	// rewritable.
+	"Accept-Encoding",
 
-	// The browser's identity, and the fetch metadata that has to stay
-	// consistent with it. Sec-Fetch-Site is overwritten in setRequestIdentity;
-	// the rest describe the request in terms proxying does not change.
-	"User-Agent", "Upgrade-Insecure-Requests",
-	"Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site", "Sec-Fetch-User",
-	"Sec-CH-UA", "Sec-CH-UA-Mobile", "Sec-CH-UA-Platform", "Sec-CH-UA-Platform-Version",
-	"Sec-CH-UA-Arch", "Sec-CH-UA-Bitness", "Sec-CH-UA-Model",
-	"Sec-CH-UA-Full-Version", "Sec-CH-UA-Full-Version-List", "Sec-CH-UA-WoW64",
+	// Android WebView fills this with the host app's package name. Forwarding
+	// it announces "com.bumshi.browser" to every site, links a user's traffic
+	// together, and reads as an automated client.
+	"X-Requested-With",
 
-	// Preferences a browser volunteers. Dropping them is itself an anomaly:
-	// a real Chrome always sends them.
-	"Priority", "DNT", "Sec-GPC", "Sec-CH-Prefers-Color-Scheme",
+	// The client's address under every name an edge has ever invented for it.
+	"X-Real-IP", "True-Client-IP", "Client-IP", "X-Client-IP",
+	"X-Cluster-Client-IP", "X-Http-Client-IP", "Proxy-Client-IP",
+	"WL-Proxy-Client-IP", "X-Original-Forwarded-For", "CF-Connecting-IP",
 
-	// HTTP authentication, for sites that use it.
-	"Authorization",
+	// The relay itself, disclosed without naming the client.
+	"Forwarded", "Via", "CDN-Loop",
 )
+
+// deniedRequestHeaderPrefixes are vendor namespaces whose whole purpose is to
+// describe a request's journey through an edge. They are matched by prefix
+// because each is open-ended: Cloudflare alone sends CF-Connecting-IP, CF-Ray,
+// CF-IPCountry, CF-Visitor and adds more over time, and naming them one by one
+// is how the leak happened in the first place.
+var deniedRequestHeaderPrefixes = []string{
+	"Cf-",          // Cloudflare
+	"X-Forwarded-", // the de facto standard, and every vendor's variant
+	"X-Amz-Cf-",    // CloudFront
+	"X-Azure-",     // Azure Front Door
+	"X-Envoy-",     // Envoy, Istio
+	"Fastly-",      // Fastly
+	"Akamai-",      // Akamai
+	"X-Akamai-",
+	"Fly-",      // Fly.io
+	"X-Vercel-", // Vercel
+}
 
 // headerSet builds a lookup set with canonicalised keys.
 //

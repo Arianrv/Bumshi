@@ -91,7 +91,18 @@
   // URL on proxyOrigin, using clientUrl (the proxied document's URL) as the base
   // for same-origin references. Requests that are already proxied or target the
   // engine assets are returned unchanged.
-  function rewriteRequestURL(proxyOrigin, clientUrl, requestUrl) {
+  // moduleLike marks the request destinations whose relative references the
+  // browser resolves against the REFERRING FILE rather than the document, and
+  // which therefore produce recoverable wreckage under PREFIX. See the
+  // recovery block in rewriteRequestURL.
+  //
+  // Gating on this is what keeps the recovery from eating a target site's own
+  // "/p/..." path. Those arrive as documents, images or plain fetches, never as
+  // module scripts, and a server-rendered link to one was already rewritten
+  // during the HTML scan and never reaches the worker at all.
+  var moduleLike = { script: 1, worker: 1, sharedworker: 1, serviceworker: 1 };
+
+  function rewriteRequestURL(proxyOrigin, clientUrl, requestUrl, destination) {
     var req;
     try {
       req = new URL(requestUrl);
@@ -106,9 +117,33 @@
       if (!baseAbs) {
         return requestUrl;
       }
+      // A module path under PREFIX whose token does NOT decode is the wreckage
+      // of the browser resolving a relative specifier against a proxy URL. It
+      // is not corrupt — it is recoverable, because the resolution was purely
+      // mechanical:
+      //
+      //   module   /p/<token of https://web.telegram.org/k/index-abc.js>
+      //   import("./lang-xyz.js")
+      //   browser  /p/lang-xyz.js          <- last segment replaced
+      //
+      // Everything after PREFIX is therefore the original specifier, already
+      // resolved against the importing file's directory. Treating it as
+      // RELATIVE — no leading slash — and resolving it against that file's real
+      // URL reconstructs the target exactly. Left as the root-relative
+      // "/p/lang-xyz.js" it resolves to the site root and 404s, which is why
+      // every ES-module site rendered a blank page.
+      //
+      // Restricted to module-like destinations because a target site's own
+      // "/p/product/123" is indistinguishable by shape. That one arrives as a
+      // document, an image or a plain fetch; only the wreckage arrives as a
+      // script, and only when the base is the importing file.
+      var ref = req.pathname;
+      if (moduleLike[destination] && ref.indexOf(PREFIX) === 0) {
+        ref = ref.slice(PREFIX.length);
+      }
       var real;
       try {
-        real = new URL(req.pathname + req.search + req.hash, baseAbs).href;
+        real = new URL(ref + req.search + req.hash, baseAbs).href;
       } catch (e) {
         return requestUrl;
       }

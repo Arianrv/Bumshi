@@ -42,7 +42,10 @@ async function handle(event, url) {
   }
 
   var clientUrl = await clientURL(event);
-  var target = B.rewriteRequestURL(proxyOrigin, clientUrl, url.href);
+  // The destination tells the rewriter whether relative references on this
+  // request were resolved against the referring FILE (modules, workers) or
+  // against the document. See the recovery block in rewriter.js.
+  var target = B.rewriteRequestURL(proxyOrigin, clientUrl, url.href, event.request.destination);
   if (target === url.href) {
     return fetch(event.request);
   }
@@ -56,9 +59,34 @@ async function handle(event, url) {
   return fetch(await buildRequest(target, event.request));
 }
 
-// clientURL resolves the document a request belongs to, which is the base for
-// resolving its root-relative paths back onto the real site.
+// clientURL resolves the base a request's relative references belong to.
+//
+// The referrer comes first, and the document only after it, because they are
+// not the same thing and the difference decides whether module-built sites work
+// at all. A reference inside a stylesheet resolves against the stylesheet; a
+// specifier inside an ES module resolves against that module. Both are the
+// referrer. Only for a subresource of the page itself are the two identical,
+// which is why using the document alone looked correct for so long.
+//
+// Telegram Web is the case that exposes it: index-<hash>.js does
+// `import("./lang-<hash>.js")`, the browser resolves that against the module's
+// own URL — a proxy URL — and asks for a path whose token is wreckage. Resolved
+// against the document that is the wrong directory and 404s; resolved against
+// the importing module it is exactly right.
+//
+// Only a referrer that decodes as a proxy URL is trusted, so an unrelated
+// referrer can never redirect a request to the wrong site.
 async function clientURL(event) {
+  var ref = event.request.referrer;
+  if (ref && ref !== "about:client") {
+    try {
+      if (new URL(ref).origin === self.location.origin && B.decodeProxied(new URL(ref).pathname)) {
+        return ref;
+      }
+    } catch (e) {
+      /* fall through to the document */
+    }
+  }
   var id = event.clientId || event.resultingClientId;
   if (id) {
     try {
@@ -70,8 +98,8 @@ async function clientURL(event) {
       /* ignore */
     }
   }
-  if (event.request.referrer) {
-    return event.request.referrer;
+  if (ref) {
+    return ref;
   }
   // Last resort: only when there is exactly one window, so the base is
   // unambiguous. With several tabs open, guessing the first one resolves a

@@ -145,9 +145,10 @@ func TestAppIdentifyingHeadersAreNotForwarded(t *testing.T) {
 // which is precisely the disclosure this service exists to prevent, and which
 // reads to any anti-abuse system as a request announcing itself as a relay.
 //
-// The unknown-header case at the end is the point of the whole test. The filter
-// is an allowlist so that an edge nobody here anticipated cannot leak by
-// default; a denylist would pass X-Some-Future-Cdn-Client-Ip silently.
+// Cf-Future-Client-Address is invented on purpose: Cloudflare adds headers to
+// that namespace over time, and naming them one at a time is how the leak
+// happened. Prefix matching is what makes the guarantee hold for headers this
+// repository has never heard of.
 func TestEdgeHeadersDoNotLeakClientIdentity(t *testing.T) {
 	var got http.Header
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -157,11 +158,10 @@ func TestEdgeHeadersDoNotLeakClientIdentity(t *testing.T) {
 
 	const clientIP = "5.22.10.77" // stand-in for a user's real address
 
-	// Headers that carry the client's own address. The last one is invented:
-	// no denylist could contain it, which is the argument for an allowlist.
+	// Headers that carry the client's own address.
 	carriesIP := []string{
 		"Cf-Connecting-Ip", "True-Client-Ip", "Fastly-Client-Ip", "X-Client-Ip",
-		"X-Forwarded-For", "X-Real-Ip", "X-Some-Future-Cdn-Client-Ip",
+		"X-Forwarded-For", "X-Real-Ip", "Cf-Future-Client-Address",
 	}
 	// Headers that disclose the relay rather than the client. On their own they
 	// are enough to mark the request as proxied.
@@ -200,6 +200,45 @@ func TestEdgeHeadersDoNotLeakClientIdentity(t *testing.T) {
 	// The allowlist must not have thrown out the baby with the bathwater.
 	if got.Get("User-Agent") == "" || got.Get("Accept") == "" {
 		t.Errorf("real browser headers were dropped: %v", got)
+	}
+}
+
+// TestPageHeadersSurvive is the other half of the guarantee, and the reason the
+// filter is not an allowlist.
+//
+// Only the headers a BROWSER generates can be enumerated. The ones a page's own
+// JavaScript attaches cannot: a CSRF token, an API key, a GraphQL client name,
+// a build stamp — every one is site-specific and arbitrary. An allowlist drops
+// all of them, so sign-in and every XHR quietly stop working on sites nobody
+// thought to test, and the failure looks like the site's fault.
+func TestPageHeadersSurvive(t *testing.T) {
+	var got http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	defer upstream.Close()
+
+	page := map[string]string{
+		"X-Csrf-Token":              "abc123",
+		"X-Xsrf-Token":              "def456",
+		"Apollographql-Client-Name": "web",
+		"X-Api-Key":                 "k-789",
+		"X-App-Version":             "4.2.1",
+		"Authorization":             "Bearer t0ken",
+		"Content-Type":              "application/json",
+	}
+
+	h := newTestHandler(upstream.Client())
+	req := httptest.NewRequest("POST", link.EncodeString(upstream.URL+"/graphql"), strings.NewReader("{}"))
+	for k, v := range page {
+		req.Header.Set(k, v)
+	}
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	for k, want := range page {
+		if v := got.Get(k); v != want {
+			t.Errorf("%s = %q, want %q — the page set it and the site needs it", k, v, want)
+		}
 	}
 }
 
@@ -494,5 +533,111 @@ func TestWebSocketToPrivateAddressBlocked(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (SSRF-blocked)", rec.Code)
+	}
+}
+
+// TestFetchMetadataIsCoherent guards against header combinations no browser can
+// produce. They are cross-checked against each other and against Origin and
+// Referer, and an impossible pair is a cheaper, more reliable bot signal than
+// any TLS fingerprint — which is why the proxy was being challenged from an IP
+// that answered a hundred plain curl searches without complaint.
+func TestFetchMetadataIsCoherent(t *testing.T) {
+	var got http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	defer upstream.Close()
+
+	t.Run("a navigation is a document, whatever the dest claims", func(t *testing.T) {
+		// Android WebView labels a programmatic loadUrl() "empty", which paired
+		// with mode=navigate cannot happen in a browser.
+		h := newTestHandler(upstream.Client())
+		req := httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/page"), nil)
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+		req.Header.Set("Sec-Fetch-Site", "none")
+		h.ServeHTTP(httptest.NewRecorder(), req)
+
+		if d := got.Get("Sec-Fetch-Dest"); d != "document" {
+			t.Errorf("Sec-Fetch-Dest = %q with mode=navigate, want %q", d, "document")
+		}
+	})
+
+	t.Run("a request carrying an Origin is never site=none", func(t *testing.T) {
+		h := newTestHandler(upstream.Client())
+		req := httptest.NewRequest("POST", link.EncodeString(upstream.URL+"/gen_204"), strings.NewReader("x"))
+		req.Header.Set("Origin", "https://proxy.example")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Site", "none")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		h.ServeHTTP(httptest.NewRecorder(), req)
+
+		if s := got.Get("Sec-Fetch-Site"); s == "none" {
+			t.Errorf("Sec-Fetch-Site = none beside Origin %q: no browser emits that", got.Get("Origin"))
+		}
+		// Origin must describe the target, never the proxy.
+		if o := got.Get("Origin"); !strings.HasPrefix(o, "http://127.0.0.1") && !strings.HasPrefix(o, "http://[::1]") {
+			t.Errorf("Origin = %q, want the target's own origin", o)
+		}
+	})
+
+	t.Run("a client that sends no fetch metadata gets none invented", func(t *testing.T) {
+		h := newTestHandler(upstream.Client())
+		req := httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/page"), nil)
+		h.ServeHTTP(httptest.NewRecorder(), req)
+
+		for _, k := range []string{"Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site"} {
+			if v := got.Get(k); v != "" {
+				t.Errorf("%s = %q, want absent: inventing one is its own anomaly", k, v)
+			}
+		}
+	})
+}
+
+// TestRuntimeIsInjectedIntoWebViewNavigations covers the bug the fetch-metadata
+// log exposed. shouldInject read "Sec-Fetch-Dest: empty" as "this is an XHR,
+// do not inject", so every page Android WebView opened was served with no
+// runtime at all — no URL hooks, no cookie or storage shim, no service worker.
+func TestRuntimeIsInjectedIntoWebViewNavigations(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		io.WriteString(w, "<html><head><title>t</title></head><body>hi</body></html>")
+	}))
+	defer upstream.Close()
+
+	h := New(Options{
+		Client:     upstream.Client(),
+		Logger:     discard(),
+		Collectors: NewCollectors(metrics.NewRegistry()),
+		InjectHTML: func(body []byte, nonce string) []byte {
+			return append([]byte("<!--BOOTSTRAP-->"), body...)
+		},
+	})
+
+	for _, tc := range []struct {
+		name, dest, mode string
+		want             bool
+	}{
+		{"webview navigation", "empty", "navigate", true},
+		{"normal navigation", "document", "navigate", true},
+		{"iframe", "iframe", "navigate", true},
+		{"an actual XHR fragment", "empty", "cors", false},
+		{"no metadata at all", "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/page"), nil)
+			if tc.dest != "" {
+				req.Header.Set("Sec-Fetch-Dest", tc.dest)
+			}
+			if tc.mode != "" {
+				req.Header.Set("Sec-Fetch-Mode", tc.mode)
+			}
+			h.ServeHTTP(rec, req)
+
+			if injected := strings.Contains(rec.Body.String(), "<!--BOOTSTRAP-->"); injected != tc.want {
+				t.Errorf("injected = %v, want %v (dest=%q mode=%q)", injected, tc.want, tc.dest, tc.mode)
+			}
+		})
 	}
 }
