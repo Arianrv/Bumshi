@@ -1,46 +1,52 @@
+# golangci-lint configuration (schema v2).
+#
+# v2 restructured the file: formatters moved out of `linters`, `linters-settings`
+# became `linters.settings`, `issues.exclude-rules` became
+# `linters.exclusions.rules`, and `gosimple` was merged into `staticcheck`.
+
+version: "2"
+
 run:
-  timeout: 5m
   tests: true
 
 linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
   enable:
-    - errcheck
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
-    - gosimple
-    - gofmt
-    - goimports
-    - misspell
-    - revive
     - bodyclose
     - gosec
+    - misspell
+    - nolintlint
+    - revive
     - unconvert
     - unparam
-    - nolintlint
-
-linters-settings:
-  errcheck:
-    exclude-functions:
-      - (*strings.Builder).WriteString
-      - (*strings.Builder).WriteByte
-      - (*strings.Builder).WriteRune
-      - fmt.Fprintf
-      - fmt.Fprintln
-  goimports:
-    local-prefixes: github.com/bumshi/bumshi
-  revive:
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*strings.Builder).WriteString
+        - (*strings.Builder).WriteByte
+        - (*strings.Builder).WriteRune
+        - fmt.Fprintf
+        - fmt.Fprintln
+    revive:
+      rules:
+        - name: exported
+  exclusions:
     rules:
-      - name: exported
-        disabled: false
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/bumshi/bumshi
 
 issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - gosec
-        - errcheck
-        - unparam
   max-issues-per-linter: 0
   max-same-issues: 0
