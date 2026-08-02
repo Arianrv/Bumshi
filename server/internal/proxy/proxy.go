@@ -58,7 +58,7 @@ type Options struct {
 	RewriteMaxBytes int64
 	// InjectHTML, if set, is applied to rewritten HTML bodies to insert the
 	// client runtime bootstrap (see internal/webengine). It may be nil.
-	InjectHTML func([]byte) []byte
+	InjectHTML func(body []byte, nonce string) []byte
 	// Enabled, if set, gates the proxy at request time so the admin panel can
 	// toggle it live. When it returns false, requests get 404. Nil means always
 	// enabled.
@@ -89,7 +89,7 @@ type Handler struct {
 	logger       *slog.Logger
 	col          *Collectors
 	rewriteMax   int64
-	injectHTML   func([]byte) []byte
+	injectHTML   func(body []byte, nonce string) []byte
 	enabled      func() bool
 	forceIPv4    bool
 	requireToken bool
@@ -255,15 +255,20 @@ func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	nonce := ""
+	if resp.Header.Get("Content-Security-Policy") != "" || resp.Header.Get("Content-Security-Policy-Report-Only") != "" {
+		nonce = newCSPNonce()
+	}
+
 	html, css := rewrite.Classify(resp.Header.Get("Content-Type"))
 	if html || css {
 		// Headers are staged inside serveRewritten, only once the body has been
 		// read: staging them here would leave the upstream's Set-Cookie and
 		// friends attached to the 502 page if the read fails.
-		h.serveRewritten(w, r, resp, target, html, rc)
+		h.serveRewritten(w, r, resp, target, html, nonce, rc)
 		return
 	}
-	h.copyResponseHeaders(w.Header(), resp.Header, target)
+	h.copyResponseHeaders(w.Header(), resp.Header, target, nonce)
 
 	// Stream everything else through unchanged. Content-Length is intentionally
 	// dropped in copyResponseHeaders, so the server frames the response itself.
@@ -301,7 +306,7 @@ func (fw flushWriter) Write(p []byte) (int, error) {
 // (with the runtime bootstrap still injected, since that lands in the first few
 // hundred bytes) and the remainder streams through, leaving the service worker
 // and in-page hooks to rewrite that page's requests at fetch time.
-func (h *Handler) serveRewritten(w http.ResponseWriter, r *http.Request, resp *http.Response, target *url.URL, html bool, rc *http.ResponseController) {
+func (h *Handler) serveRewritten(w http.ResponseWriter, r *http.Request, resp *http.Response, target *url.URL, html bool, nonce string, rc *http.ResponseController) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, h.rewriteMax+1))
 	if err != nil {
 		h.count("upstream_error")
@@ -313,9 +318,9 @@ func (h *Handler) serveRewritten(w http.ResponseWriter, r *http.Request, resp *h
 		h.logger.WarnContext(r.Context(), "text body exceeds the rewrite limit; serving it unrewritten",
 			"host", target.Host, "limit_bytes", h.rewriteMax)
 		if html && h.injectHTML != nil && shouldInject(r) {
-			body = h.injectHTML(body)
+			body = h.injectHTML(body, nonce)
 		}
-		h.copyResponseHeaders(w.Header(), resp.Header, target)
+		h.copyResponseHeaders(w.Header(), resp.Header, target, nonce)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(body)
 		_ = rc.Flush()
@@ -327,12 +332,12 @@ func (h *Handler) serveRewritten(w http.ResponseWriter, r *http.Request, resp *h
 	if html {
 		body = rewrite.HTML(target, body)
 		if h.injectHTML != nil && shouldInject(r) {
-			body = h.injectHTML(body)
+			body = h.injectHTML(body, nonce)
 		}
 	} else {
 		body = rewrite.CSS(target, body)
 	}
-	h.copyResponseHeaders(w.Header(), resp.Header, target)
+	h.copyResponseHeaders(w.Header(), resp.Header, target, nonce)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
@@ -453,7 +458,7 @@ var controlPlaneHeaders = []string{
 	"Cross-Origin-Resource-Policy",
 }
 
-func (h *Handler) copyResponseHeaders(dst, src http.Header, base *url.URL) {
+func (h *Handler) copyResponseHeaders(dst, src http.Header, base *url.URL, nonce string) {
 	for _, k := range controlPlaneHeaders {
 		dst.Del(k)
 	}
@@ -474,7 +479,12 @@ func (h *Handler) copyResponseHeaders(dst, src http.Header, base *url.URL) {
 			}
 			continue
 		case "Content-Security-Policy", "Content-Security-Policy-Report-Only":
-			// Would block proxied subresources; dropped in v1.
+			// Translated onto the proxy origin rather than dropped: discarding it
+			// would leave one XSS anywhere able to compromise every site the user
+			// browses through this shared origin. See csp.go.
+			if policy := rewriteCSP(src.Get(ck), nonce); policy != "" {
+				dst.Set(ck, policy)
+			}
 			continue
 		case "Strict-Transport-Security":
 			// HSTS is applied by our own edge, not the target's.

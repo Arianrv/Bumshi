@@ -50,7 +50,7 @@ func TestPathTraversalRejected(t *testing.T) {
 
 func TestInjectAfterHead(t *testing.T) {
 	in := []byte(`<!doctype html><html><head><title>x</title></head><body>hi</body></html>`)
-	out := Inject(in)
+	out := Inject(in, "")
 	if !bytes.Contains(out, bootstrap) {
 		t.Fatal("bootstrap not injected")
 	}
@@ -67,7 +67,7 @@ func TestInjectIsNotFooledByHeaderElement(t *testing.T) {
 	// real <head> that placed the bootstrap in the middle of the body, after the
 	// page's own scripts had already run.
 	in := []byte(`<div><header>top</header><p>body</p></div>`)
-	out := Inject(in)
+	out := Inject(in, "")
 	if !bytes.HasPrefix(out, bootstrap) {
 		t.Errorf("bootstrap should be prepended when there is no <head>:\n%s", out)
 	}
@@ -78,7 +78,7 @@ func TestInjectIsNotFooledByHeaderElement(t *testing.T) {
 
 func TestInjectHandlesHeadWithAttributes(t *testing.T) {
 	in := []byte(`<html><head lang="en"><title>x</title></head><body>hi</body></html>`)
-	out := Inject(in)
+	out := Inject(in, "")
 	headIdx := bytes.Index(out, []byte(`<head lang="en">`))
 	scriptIdx := bytes.Index(out, bootstrap)
 	titleIdx := bytes.Index(out, []byte("<title>"))
@@ -87,9 +87,52 @@ func TestInjectHandlesHeadWithAttributes(t *testing.T) {
 	}
 }
 
+func TestInjectAppliesCSPNonce(t *testing.T) {
+	out := Inject([]byte(`<html><head></head><body></body></html>`), "NONCE123")
+	if !bytes.Contains(out, []byte(`nonce="NONCE123"`)) {
+		t.Errorf("nonce not applied to the injected scripts:\n%s", out)
+	}
+	if n := bytes.Count(out, []byte(`nonce="NONCE123"`)); n != len(bootstrapAssets) {
+		t.Errorf("nonce on %d scripts, want %d:\n%s", n, len(bootstrapAssets), out)
+	}
+}
+
+func TestInjectWithoutNonceEmitsPlainScripts(t *testing.T) {
+	out := Inject([]byte(`<html><head></head></html>`), "")
+	if bytes.Contains(out, []byte("nonce=")) {
+		t.Errorf("no nonce should be emitted when the response has no CSP:\n%s", out)
+	}
+}
+
+func TestAuthHandlerSetsCookieAndRedirects(t *testing.T) {
+	rec := httptest.NewRecorder()
+	AuthHandler(true).ServeHTTP(rec, httptest.NewRequest("GET", AuthPath+"?t=the-token", nil))
+
+	if rec.Code != 303 {
+		t.Fatalf("status = %d, want 303", rec.Code)
+	}
+	sc := rec.Header().Get("Set-Cookie")
+	for _, want := range []string{"bumshi_access=the-token", "HttpOnly", "Secure", "Path=/"} {
+		if !strings.Contains(sc, want) {
+			t.Errorf("Set-Cookie missing %q: %s", want, sc)
+		}
+	}
+}
+
+func TestAuthHandlerRejectsMissingToken(t *testing.T) {
+	rec := httptest.NewRecorder()
+	AuthHandler(true).ServeHTTP(rec, httptest.NewRequest("GET", AuthPath, nil))
+	if rec.Code != 400 {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+	if rec.Header().Get("Set-Cookie") != "" {
+		t.Error("no cookie should be set without a token")
+	}
+}
+
 func TestInjectWithoutHeadPrepends(t *testing.T) {
 	in := []byte(`<div>no head here</div>`)
-	out := Inject(in)
+	out := Inject(in, "")
 	if !bytes.HasPrefix(out, bootstrap) {
 		t.Error("bootstrap should be prepended when there is no <head>")
 	}

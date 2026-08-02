@@ -1,9 +1,12 @@
 // Package server wires configuration, logging, metrics, health, and routing
 // into a runnable control-plane service.
 //
-// It runs two listeners: the control plane (public routes, fronted by Caddy)
-// and a separate metrics listener that must stay bound to localhost. Both are
-// shut down gracefully when the run context is canceled.
+// It runs up to three listeners, each isolated from the others on purpose:
+// the control plane (public routes, fronted by Caddy), a metrics listener that
+// must stay bound to localhost, and — when the panel is enabled — an admin
+// listener that is also localhost-bound, so the panel never shares an origin
+// with the third-party content the proxy serves. All are shut down gracefully
+// when the run context is canceled.
 package server
 
 import (
@@ -38,6 +41,7 @@ type Server struct {
 
 	main    *http.Server
 	metrics *http.Server
+	admin   *http.Server // nil unless the panel is enabled
 }
 
 // New constructs a Server from cfg and logger. It builds the routers and HTTP
@@ -59,10 +63,13 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	}
 
 	proxyHandler, engineHandler := buildProxy(cfg, logger, reg, live, access)
-	adminHandler := buildAdmin(cfg, logger, live, access)
+	var authHandler http.Handler
+	if engineHandler != nil {
+		authHandler = webengine.AuthHandler(cfg.IsProduction())
+	}
 
 	mainHandler := httpx.Chain(
-		routes(hc, proxyHandler, engineHandler, adminHandler, cfg.AdminPath),
+		routes(hc, proxyHandler, engineHandler, authHandler),
 		httpx.RequestID(),         // outermost: every layer sees the ID
 		httpx.Metrics(collectors), // count even panicked requests (recovered below)
 		httpx.Recoverer(logger),
@@ -74,6 +81,29 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	metricsMux.Handle("GET /metrics", reg.Handler())
 
 	errLog := slog.NewLogLogger(logger.Handler(), slog.LevelError)
+
+	// The panel gets its own listener rather than a path on the control plane.
+	// On a shared origin, any page a user opens through the proxy can call the
+	// panel's API with the deployer's session cookie attached — same-site rules
+	// do not help, because it is literally the same site. Bound to localhost by
+	// default: reach it over "ssh -L", or give it a hostname of its own.
+	var adminSrv *http.Server
+	if adminHandler := buildAdmin(cfg, logger, live, access); adminHandler != nil {
+		adminMux := http.NewServeMux()
+		adminMux.Handle(cfg.AdminPath, adminHandler)
+		adminMux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, cfg.AdminPath, http.StatusSeeOther)
+		})
+		adminSrv = &http.Server{
+			Addr:              cfg.AdminAddr,
+			Handler:           httpx.Chain(adminMux, httpx.RequestID(), httpx.Recoverer(logger), httpx.SecurityHeaders()),
+			ReadTimeout:       cfg.ReadTimeout,
+			ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+			WriteTimeout:      cfg.WriteTimeout,
+			IdleTimeout:       cfg.IdleTimeout,
+			ErrorLog:          errLog,
+		}
+	}
 
 	return &Server{
 		cfg:    cfg,
@@ -94,6 +124,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 			ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 			ErrorLog:          errLog,
 		},
+		admin: adminSrv,
 	}
 }
 
@@ -186,9 +217,20 @@ func randomAdminPassword() (password, hash string, err error) {
 // fails, then performs a graceful shutdown bounded by the configured shutdown
 // timeout. It returns the first fatal listener error, if any.
 func (s *Server) Run(ctx context.Context) error {
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	var wg sync.WaitGroup
 	wg.Add(2)
+
+	if s.admin != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.logger.Info("admin listener starting", "addr", s.cfg.AdminAddr, "path", s.cfg.AdminPath)
+			if err := s.admin.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
 
 	go func() {
 		defer wg.Done()
@@ -230,5 +272,10 @@ func (s *Server) shutdown() {
 	}
 	if err := s.metrics.Shutdown(ctx); err != nil {
 		s.logger.Error("metrics shutdown error", "error", err)
+	}
+	if s.admin != nil {
+		if err := s.admin.Shutdown(ctx); err != nil {
+			s.logger.Error("admin shutdown error", "error", err)
+		}
 	}
 }

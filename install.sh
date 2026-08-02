@@ -239,6 +239,11 @@ BUMSHI_PROXY_FORCE_IPV4=true
 BUMSHI_PROXY_REQUIRE_TOKEN=false
 
 BUMSHI_ADMIN_ENABLED=true
+# The panel listens on its own port, bound to localhost, so it never shares an
+# origin with proxied content: on a shared origin any site a user opens through
+# the proxy can call the panel API with your session cookie attached. Reach it
+# with an SSH tunnel (see the install summary).
+BUMSHI_ADMIN_ADDR=127.0.0.1:8081
 BUMSHI_ADMIN_PATH=${admin_path}
 BUMSHI_ADMIN_USERNAME=${admin_user}
 BUMSHI_ADMIN_PASSWORD_HASH=${hash}
@@ -412,7 +417,11 @@ summary() {
   section "Done" "Bumshi is installed and running."
   local url
   if [ -n "$domain" ] && [ "${cert_mode:-skip}" != "skip" ]; then url="https://${domain}"; else url="http://<server-ip>:8080"; fi
-  echo -e "  ${c_bold}Panel${c_reset}    ${url}${admin_path}"
+  echo -e "  ${c_bold}Users${c_reset}    ${url}   ${c_dim}(what you share with people)${c_reset}"
+  echo
+  echo -e "  ${c_bold}Panel${c_reset}    ${c_yellow}not exposed to the internet${c_reset} — open a tunnel from your own machine:"
+  echo -e "           ${c_dim}ssh -N -L 8081:127.0.0.1:8081 root@${domain:-<server-ip>}${c_reset}"
+  echo -e "           then browse to  http://127.0.0.1:8081${admin_path}"
   echo -e "  ${c_bold}Login${c_reset}    ${admin_user}"
   if [ "${gen_note:-0}" = "1" ]; then
     echo -e "  ${c_bold}Password${c_reset} ${c_yellow}${admin_pass}${c_reset}  ${c_dim}(shown once — save it now)${c_reset}"

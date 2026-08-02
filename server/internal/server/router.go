@@ -10,11 +10,13 @@ import (
 	"github.com/bumshi/bumshi/server/internal/webengine"
 )
 
-// routes builds the control-plane router. The generic web proxy is mounted under
-// link.Prefix, its browser runtime under webengine.Prefix, and the admin panel
-// under adminPath — each only when its handler is non-nil. The YouTube and
-// Telegram modules follow in later milestones.
-func routes(hc *health.Checker, proxyHandler, engineHandler, adminHandler http.Handler, adminPath string) http.Handler {
+// routes builds the control-plane router: the generic web proxy under
+// link.Prefix and its browser runtime under webengine.Prefix, each only when its
+// handler is non-nil.
+//
+// The admin panel is deliberately absent. It runs on its own listener (see
+// config.AdminAddr) so it never shares an origin with proxied content.
+func routes(hc *health.Checker, proxyHandler, engineHandler, authHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", hc.Live)
 	mux.HandleFunc("GET /readyz", hc.Ready)
@@ -25,8 +27,9 @@ func routes(hc *health.Checker, proxyHandler, engineHandler, adminHandler http.H
 	if engineHandler != nil {
 		mux.Handle(webengine.Prefix, engineHandler)
 	}
-	if adminHandler != nil && adminPath != "" {
-		mux.Handle(adminPath, adminHandler)
+	if authHandler != nil {
+		// More specific than the asset prefix above, so it wins.
+		mux.Handle("GET "+webengine.AuthPath, authHandler)
 	}
 	return mux
 }

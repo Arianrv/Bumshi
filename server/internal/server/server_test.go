@@ -10,7 +10,7 @@ import (
 func TestRoutes(t *testing.T) {
 	hc := health.New()
 	hc.SetReady(true)
-	h := routes(hc, nil, nil, nil, "/admin/")
+	h := routes(hc, nil, nil, nil)
 
 	cases := []struct {
 		path string
@@ -33,7 +33,7 @@ func TestRoutes(t *testing.T) {
 func TestReadyzReflectsCheckerState(t *testing.T) {
 	hc := health.New() // not ready
 	rec := httptest.NewRecorder()
-	routes(hc, nil, nil, nil, "/admin/").ServeHTTP(rec, httptest.NewRequest("GET", "/readyz", nil))
+	routes(hc, nil, nil, nil).ServeHTTP(rec, httptest.NewRequest("GET", "/readyz", nil))
 	if rec.Code != 503 {
 		t.Errorf("readyz before ready = %d, want 503", rec.Code)
 	}
@@ -42,7 +42,7 @@ func TestReadyzReflectsCheckerState(t *testing.T) {
 func TestVersionEndpointIsJSON(t *testing.T) {
 	hc := health.New()
 	rec := httptest.NewRecorder()
-	routes(hc, nil, nil, nil, "/admin/").ServeHTTP(rec, httptest.NewRequest("GET", "/version", nil))
+	routes(hc, nil, nil, nil).ServeHTTP(rec, httptest.NewRequest("GET", "/version", nil))
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
 		t.Errorf("content-type = %q", ct)
 	}

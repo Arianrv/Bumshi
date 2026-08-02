@@ -152,13 +152,26 @@ func AccessLog(logger *slog.Logger, enabled func() bool) Middleware {
 			logger.InfoContext(r.Context(), "request",
 				"request_id", RequestIDFrom(r.Context()),
 				"method", r.Method,
-				"path", r.URL.Path,
+				"path", redactPath(r.URL.Path),
 				"status", rr.status,
 				"bytes", rr.bytes,
 				"duration_ms", time.Since(start).Milliseconds(),
 			)
 		})
 	}
+}
+
+// redactedPaths carry a secret in the URL and must never be written to a log.
+var redactedPaths = []string{"/__bumshi__/auth"}
+
+// redactPath replaces a secret-bearing path with a placeholder.
+func redactPath(path string) string {
+	for _, p := range redactedPaths {
+		if path == p {
+			return p + " (redacted)"
+		}
+	}
+	return path
 }
 
 // responseRecorder captures the status code and byte count of a response while

@@ -1,10 +1,12 @@
 package httpx
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/bumshi/bumshi/server/internal/metrics"
@@ -162,6 +164,26 @@ func TestChainPreservesFlush(t *testing.T) {
 
 	if flushErr != nil {
 		t.Fatalf("Flush through the middleware chain: %v", flushErr)
+	}
+}
+
+func TestAccessLogRedactsTheTokenBearingPath(t *testing.T) {
+	// The auth endpoint carries an access token in its query string. Even with
+	// access logging deliberately switched on, it must not reach disk.
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	h := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		AccessLog(logger, func() bool { return true }))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/__bumshi__/auth?t=super-secret", nil))
+
+	out := buf.String()
+	if strings.Contains(out, "super-secret") {
+		t.Errorf("access token was logged: %s", out)
+	}
+	if !strings.Contains(out, "redacted") {
+		t.Errorf("path was not redacted: %s", out)
 	}
 }
 

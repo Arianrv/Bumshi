@@ -69,6 +69,13 @@ type Config struct {
 
 	// AdminEnabled mounts the deployer-only admin panel.
 	AdminEnabled bool
+	// AdminAddr is the panel's own listener. It is deliberately separate from
+	// the control-plane listener: sharing an origin with proxied content means
+	// any page a user visits through the proxy can call the panel's API with the
+	// deployer's session cookie attached. Bound to localhost by default, so the
+	// panel is reached over an SSH tunnel unless the operator deliberately
+	// exposes it on a hostname of its own.
+	AdminAddr string
 	// AdminPath is the panel's base path (normalized to start and end with '/').
 	AdminPath string
 	// AdminUsername is the admin login name.
@@ -107,6 +114,7 @@ func Load() (Config, error) {
 		ProxyRequireToken:          getBool("PROXY_REQUIRE_TOKEN", false),
 
 		AdminEnabled:      getBool("ADMIN_ENABLED", false),
+		AdminAddr:         getString("ADMIN_ADDR", "127.0.0.1:8081"),
 		AdminPath:         getString("ADMIN_PATH", "/admin/"),
 		AdminUsername:     getString("ADMIN_USERNAME", "admin"),
 		AdminPasswordHash: getString("ADMIN_PASSWORD_HASH", ""),
@@ -181,6 +189,18 @@ func (c Config) validate() error {
 		}
 		if c.AdminUsername == "" {
 			return fmt.Errorf("%sADMIN_USERNAME must not be empty", envPrefix)
+		}
+		if c.AdminAddr == "" {
+			return fmt.Errorf("%sADMIN_ADDR must not be empty", envPrefix)
+		}
+		// Sharing a listener with proxied content would put the panel on the same
+		// origin as every site a user visits, which is what lets a hostile page
+		// call its API with the deployer's session attached.
+		if c.AdminAddr == c.ListenAddr {
+			return fmt.Errorf("%sADMIN_ADDR must differ from %sLISTEN_ADDR (both %q): the panel must not share an origin with proxied content", envPrefix, envPrefix, c.AdminAddr)
+		}
+		if c.AdminAddr == c.MetricsAddr {
+			return fmt.Errorf("%sADMIN_ADDR and %sMETRICS_ADDR must differ (both %q)", envPrefix, envPrefix, c.AdminAddr)
 		}
 	}
 	return nil

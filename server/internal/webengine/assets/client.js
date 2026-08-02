@@ -271,6 +271,130 @@
     }
   })();
 
+  // --- web storage ---
+  //
+  // localStorage, sessionStorage, IndexedDB and CacheStorage are keyed by
+  // origin, and every proxied site now shares one. Two sites that both use the
+  // key "token" or a database called "app" silently overwrite each other — a
+  // correctness bug before it is a privacy one — and any page can read what the
+  // others stored.
+  //
+  // Every name is therefore prefixed with the current target's scope. Like the
+  // cookie shim this is a compatibility and collision fix, not a boundary: a
+  // hostile page on this origin can still reach the unwrapped APIs through a
+  // fresh iframe.
+  (function shimStorage() {
+    if (!B.cookiePrefix) {
+      return;
+    }
+
+    function scope() {
+      try {
+        return B.cookiePrefix(new URL(realBase()).hostname, false);
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function wrapStorage(name) {
+      var native;
+      try {
+        native = self[name];
+        if (!native) {
+          return;
+        }
+      } catch (e) {
+        return; // storage disabled by policy
+      }
+      var facade = {
+        getItem: function (k) {
+          var p = scope();
+          return p ? native.getItem(p + k) : null;
+        },
+        setItem: function (k, v) {
+          var p = scope();
+          if (p) {
+            native.setItem(p + k, v);
+          }
+        },
+        removeItem: function (k) {
+          var p = scope();
+          if (p) {
+            native.removeItem(p + k);
+          }
+        },
+        key: function (i) {
+          var p = scope();
+          if (!p) {
+            return null;
+          }
+          var mine = ownKeys(native, p);
+          return i >= 0 && i < mine.length ? mine[i] : null;
+        },
+        clear: function () {
+          var p = scope();
+          if (p) {
+            ownKeys(native, p).forEach(function (k) {
+              native.removeItem(p + k);
+            });
+          }
+        },
+      };
+      Object.defineProperty(facade, "length", {
+        get: function () {
+          var p = scope();
+          return p ? ownKeys(native, p).length : 0;
+        },
+      });
+      try {
+        Object.defineProperty(self, name, { configurable: true, get: function () { return facade; } });
+      } catch (e) {
+        /* ignore */
+      }
+    }
+
+    function ownKeys(native, prefix) {
+      var out = [];
+      for (var i = 0; i < native.length; i++) {
+        var k = native.key(i);
+        if (k !== null && k.indexOf(prefix) === 0) {
+          out.push(k.slice(prefix.length));
+        }
+      }
+      return out;
+    }
+
+    wrapStorage("localStorage");
+    wrapStorage("sessionStorage");
+
+    // IndexedDB and CacheStorage need only their names namespaced; the contents
+    // are then unreachable from another site's database.
+    if (self.indexedDB && self.indexedDB.open) {
+      var openDB = self.indexedDB.open.bind(self.indexedDB);
+      var deleteDB = self.indexedDB.deleteDatabase.bind(self.indexedDB);
+      self.indexedDB.open = function (name, version) {
+        var p = scope();
+        return version === undefined
+          ? openDB(p ? p + name : name)
+          : openDB(p ? p + name : name, version);
+      };
+      self.indexedDB.deleteDatabase = function (name) {
+        var p = scope();
+        return deleteDB(p ? p + name : name);
+      };
+    }
+
+    if (self.caches && self.caches.open) {
+      ["open", "has", "delete"].forEach(function (fn) {
+        var nativeFn = self.caches[fn].bind(self.caches);
+        self.caches[fn] = function (name) {
+          var p = scope();
+          return nativeFn(p ? p + name : name);
+        };
+      });
+    }
+  })();
+
   // --- register the service worker (safety net) ---
   // On the very first visit the worker is not controlling this document yet, so
   // early requests the in-page hooks cannot catch — dynamic import(), Worker(),

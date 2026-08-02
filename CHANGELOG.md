@@ -75,6 +75,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path too, and no longer depends on `BUMSHI_PROXY_REQUIRE_TOKEN` being on.
 - An upstream site can no longer shadow Bumshi's own cookies, because upstream
   `Set-Cookie` names are namespaced and unprefixed cookies are never forwarded.
+- **The admin panel has its own listener and is no longer on the proxy origin.**
+  Sharing an origin with proxied content meant any site a user opened through
+  the proxy could call the panel's API with the deployer's session cookie
+  attached — SameSite offers nothing there, because it is literally the same
+  site. It now binds to `127.0.0.1:8081` by default (`BUMSHI_ADMIN_ADDR`) and is
+  reached over an SSH tunnel, or given a hostname of its own.
+- **Content-Security-Policy is translated instead of discarded.** Dropping it
+  left one XSS anywhere able to compromise every site a user browses through the
+  shared origin. Host sources now collapse to `'self'` while keywords, nonces
+  and hashes survive, and the injected runtime is admitted with a per-response
+  nonce. Under a shared origin `'self'` is weaker than the site intended; what
+  survives is the non-origin half of CSP, which is most of what stops XSS.
+- **Web storage is namespaced per site.** `localStorage`, `sessionStorage`,
+  IndexedDB and CacheStorage were shared across every proxied site, so two sites
+  using the same key or database name silently overwrote each other. Like the
+  cookie shim this fixes collisions and casual cross-reads; it is not a boundary
+  against a hostile page on the shared origin.
+- **The desktop client can authenticate.** It has no cookie API, so it could
+  never send its access token and was locked out whenever
+  `BUMSHI_PROXY_REQUIRE_TOKEN` was on. A new `/__bumshi__/auth` endpoint installs
+  the token as an HttpOnly cookie; the access log redacts that path so the token
+  never reaches disk.
 
 ### Added
 - **Control plane (`bumshid`)**: hardened HTTP server with timeouts, graceful
