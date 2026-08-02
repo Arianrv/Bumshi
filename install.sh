@@ -495,6 +495,17 @@ main() {
     [ -n "$tag" ] || die "could not resolve the latest release; set BUMSHI_VERSION=vX.Y.Z"
   fi
 
+  # Say plainly when there is nothing new. "bumshi update" otherwise reinstalls
+  # the identical binary and prints the same success banner as a real upgrade,
+  # so a fix that was pushed to main but never tagged looks deployed when it is
+  # not. Releases are built by .github/workflows/release.yml on "v*" tags only.
+  if [ -x "$BINARY" ] && "$BINARY" version 2>/dev/null | grep -qF " ${tag} "; then
+    warn "already running ${tag} — this is the newest RELEASE."
+    warn "commits pushed to main are not released until a tag is pushed:"
+    local next="${tag%.*}.$(( ${tag##*.} + 1 ))"
+    warn "    git tag ${next} && git push origin --tags"
+  fi
+
   # Config, seeded from the environment for non-interactive installs.
   domain="$(normalize_domain "${BUMSHI_DOMAIN:-}")"
   email="${BUMSHI_EMAIL:-}"
