@@ -187,6 +187,36 @@ func TestAccessLogRedactsTheTokenBearingPath(t *testing.T) {
 	}
 }
 
+func TestAccessLogDoesNotRecordBrowsingHistory(t *testing.T) {
+	// "/p/<base64url(target)>" is the full URL of the page a user asked for.
+	// Logging it verbatim builds exactly the browsing record this project
+	// promises not to keep, in a form anyone can decode in one command.
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	h := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		AccessLog(logger, func() bool { return true }))
+
+	token := "aHR0cHM6Ly93d3cuZXhhbXBsZS5jb20vc2VjcmV0" // https://www.example.com/secret
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/p/"+token, nil))
+
+	out := buf.String()
+	if strings.Contains(out, token) {
+		t.Errorf("the requested target was logged: %s", out)
+	}
+	if !strings.Contains(out, "/p/") {
+		t.Errorf("the proxy prefix should survive for rate and error analysis: %s", out)
+	}
+}
+
+func TestProxyPathPrefixMatchesTheProxyPackage(t *testing.T) {
+	// Duplicated to keep this package independent of internal/proxy; if the two
+	// ever diverge, redaction silently stops matching.
+	if proxyPathPrefix != "/p/" {
+		t.Errorf("proxyPathPrefix = %q, want the value of link.Prefix", proxyPathPrefix)
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && (indexOf(haystack, needle) >= 0)
 }

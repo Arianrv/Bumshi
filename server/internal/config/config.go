@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -63,9 +64,17 @@ type Config struct {
 	// from Iran), so this defaults to true; set to false for dual-stack.
 	ProxyForceIPv4 bool
 	// ProxyRequireToken gates the web proxy behind a valid, unexpired access
-	// token (sent by the app as the bumshi_access cookie). Off by default so
-	// existing installs keep working until the updated client is deployed.
+	// token (sent by the app as the bumshi_access cookie).
+	//
+	// With this off the proxy is an OPEN RELAY: anyone who learns the domain can
+	// route their traffic through the operator's IP. It stays off by default only
+	// so an existing install is not cut off mid-upgrade, and starting that way
+	// now requires ProxyAllowOpenRelay to say so out loud.
 	ProxyRequireToken bool
+	// ProxyAllowOpenRelay acknowledges running the proxy with no access control.
+	// Without it, an enabled proxy that does not require a token refuses to
+	// start rather than quietly serving the whole internet.
+	ProxyAllowOpenRelay bool
 
 	// AdminEnabled mounts the deployer-only admin panel.
 	AdminEnabled bool
@@ -94,32 +103,41 @@ type Config struct {
 // Load reads configuration from the environment, applies defaults, and
 // validates the result. It never reads from disk and never panics.
 func Load() (Config, error) {
+	var errs parseErrors
 	cfg := Config{
 		Env:         Environment(getString("ENV", string(EnvProduction))),
 		ListenAddr:  getString("LISTEN_ADDR", "127.0.0.1:8080"),
 		MetricsAddr: getString("METRICS_ADDR", "127.0.0.1:9090"),
 		LogFormat:   getString("LOG_FORMAT", ""),
-		AccessLog:   getBool("ACCESS_LOG", false),
+		AccessLog:   getBool(&errs, "ACCESS_LOG", false),
 
-		ReadTimeout:       getDuration("READ_TIMEOUT", 15*time.Second),
-		ReadHeaderTimeout: getDuration("READ_HEADER_TIMEOUT", 10*time.Second),
-		WriteTimeout:      getDuration("WRITE_TIMEOUT", 30*time.Second),
-		IdleTimeout:       getDuration("IDLE_TIMEOUT", 120*time.Second),
-		ShutdownTimeout:   getDuration("SHUTDOWN_TIMEOUT", 20*time.Second),
+		ReadTimeout:       getDuration(&errs, "READ_TIMEOUT", 15*time.Second),
+		ReadHeaderTimeout: getDuration(&errs, "READ_HEADER_TIMEOUT", 10*time.Second),
+		WriteTimeout:      getDuration(&errs, "WRITE_TIMEOUT", 30*time.Second),
+		IdleTimeout:       getDuration(&errs, "IDLE_TIMEOUT", 120*time.Second),
+		ShutdownTimeout:   getDuration(&errs, "SHUTDOWN_TIMEOUT", 20*time.Second),
 
-		ProxyEnabled:               getBool("PROXY_ENABLED", false),
-		ProxyRewriteMaxBytes:       getInt64("PROXY_REWRITE_MAX_BYTES", 8<<20),
-		ProxyResponseHeaderTimeout: getDuration("PROXY_RESPONSE_HEADER_TIMEOUT", 30*time.Second),
-		ProxyForceIPv4:             getBool("PROXY_FORCE_IPV4", true),
-		ProxyRequireToken:          getBool("PROXY_REQUIRE_TOKEN", false),
+		ProxyEnabled:               getBool(&errs, "PROXY_ENABLED", false),
+		ProxyRewriteMaxBytes:       getInt64(&errs, "PROXY_REWRITE_MAX_BYTES", 8<<20),
+		ProxyResponseHeaderTimeout: getDuration(&errs, "PROXY_RESPONSE_HEADER_TIMEOUT", 30*time.Second),
+		ProxyForceIPv4:             getBool(&errs, "PROXY_FORCE_IPV4", true),
+		ProxyRequireToken:          getBool(&errs, "PROXY_REQUIRE_TOKEN", false),
+		ProxyAllowOpenRelay:        getBool(&errs, "PROXY_ALLOW_OPEN_RELAY", false),
 
-		AdminEnabled:      getBool("ADMIN_ENABLED", false),
+		AdminEnabled:      getBool(&errs, "ADMIN_ENABLED", false),
 		AdminAddr:         getString("ADMIN_ADDR", "127.0.0.1:8081"),
 		AdminPath:         getString("ADMIN_PATH", "/admin/"),
 		AdminUsername:     getString("ADMIN_USERNAME", "admin"),
 		AdminPasswordHash: getString("ADMIN_PASSWORD_HASH", ""),
 		PublicURL:         getString("PUBLIC_URL", ""),
-		AccessStorePath:   getString("ACCESS_STORE_PATH", "/var/lib/bumshi/access.json"),
+		// getStringAllowEmpty, not getString: the documented way to run
+		// RAM-only is an empty value, and getString treats empty as unset and
+		// reapplies the default — so that mode was unreachable.
+		AccessStorePath: getStringAllowEmpty("ACCESS_STORE_PATH", "/var/lib/bumshi/access.json"),
+	}
+
+	if err := errs.err(); err != nil {
+		return Config{}, err
 	}
 
 	cfg.AdminPath = normalizePath(cfg.AdminPath)
@@ -182,6 +200,29 @@ func (c Config) validate() error {
 		if c.ProxyResponseHeaderTimeout <= 0 {
 			return fmt.Errorf("%sPROXY_RESPONSE_HEADER_TIMEOUT must be positive", envPrefix)
 		}
+		if !c.ProxyRequireToken && !c.ProxyAllowOpenRelay {
+			return fmt.Errorf(
+				"refusing to start an open relay: %sPROXY_ENABLED is on but %sPROXY_REQUIRE_TOKEN is off, "+
+					"so anyone who learns this domain can route traffic through your IP. "+
+					"Set %sPROXY_REQUIRE_TOKEN=true (create access users in the panel first), "+
+					"or set %sPROXY_ALLOW_OPEN_RELAY=true if that is genuinely what you want",
+				envPrefix, envPrefix, envPrefix, envPrefix)
+		}
+	}
+	// C7: an unvalidated PublicURL produced connection links carrying
+	// {"url":""}, which every client silently refuses — the operator sees a
+	// link that simply never works, with nothing to explain why.
+	if c.PublicURL != "" {
+		u, err := url.Parse(c.PublicURL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("%sPUBLIC_URL %q must be an absolute URL, e.g. https://proxy.example.com", envPrefix, c.PublicURL)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("%sPUBLIC_URL %q must use http or https", envPrefix, c.PublicURL)
+		}
+	}
+	if c.AdminEnabled && c.PublicURL == "" {
+		return fmt.Errorf("%sPUBLIC_URL must be set when the admin panel is enabled: it is what connection links point at", envPrefix)
 	}
 	if c.AdminEnabled {
 		if !strings.HasPrefix(c.AdminPath, "/") || !strings.HasSuffix(c.AdminPath, "/") {
@@ -230,37 +271,66 @@ func getString(key, def string) string {
 	return def
 }
 
-func getBool(key string, def bool) bool {
+// Parse errors are collected rather than swallowed. Silently falling back to
+// the default meant a typo disabled a security control without a word:
+// BUMSHI_PROXY_REQUIRE_TOKEN=ture read as false and left the proxy open to
+// anyone who knew the domain. A misconfigured service now refuses to start.
+type parseErrors []string
+
+func (e *parseErrors) add(key, value, want string) {
+	*e = append(*e, fmt.Sprintf("%s%s=%q is not a valid %s", envPrefix, key, value, want))
+}
+
+func (e parseErrors) err() error {
+	if len(e) == 0 {
+		return nil
+	}
+	return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(e, "\n  - "))
+}
+
+// getStringAllowEmpty is getString except that an explicitly empty value is
+// honoured rather than treated as unset.
+func getStringAllowEmpty(key, def string) string {
+	if v, ok := os.LookupEnv(envPrefix + key); ok {
+		return strings.TrimSpace(v)
+	}
+	return def
+}
+
+func getBool(errs *parseErrors, key string, def bool) bool {
 	v, ok := os.LookupEnv(envPrefix + key)
 	if !ok || strings.TrimSpace(v) == "" {
 		return def
 	}
 	b, err := strconv.ParseBool(strings.TrimSpace(v))
 	if err != nil {
+		errs.add(key, v, "boolean (true/false)")
 		return def
 	}
 	return b
 }
 
-func getInt64(key string, def int64) int64 {
+func getInt64(errs *parseErrors, key string, def int64) int64 {
 	v, ok := os.LookupEnv(envPrefix + key)
 	if !ok || strings.TrimSpace(v) == "" {
 		return def
 	}
 	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 	if err != nil {
+		errs.add(key, v, "integer")
 		return def
 	}
 	return n
 }
 
-func getDuration(key string, def time.Duration) time.Duration {
+func getDuration(errs *parseErrors, key string, def time.Duration) time.Duration {
 	v, ok := os.LookupEnv(envPrefix + key)
 	if !ok || strings.TrimSpace(v) == "" {
 		return def
 	}
 	d, err := time.ParseDuration(strings.TrimSpace(v))
 	if err != nil {
+		errs.add(key, v, "duration (e.g. 30s, 2m)")
 		return def
 	}
 	return d

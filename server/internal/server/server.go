@@ -11,12 +11,12 @@ package server
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +52,9 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	hc := health.New()
 
 	live := settings.New(cfg.ProxyEnabled, cfg.AccessLog)
+	// Persisted beside the access roster, so a panel toggle is not silently
+	// undone by the next restart.
+	live.Persist(settingsPath(cfg.AccessStorePath), logger)
 
 	// One shared access-user roster: the admin panel manages it, the proxy gates
 	// on it. It persists to disk so users survive restarts.
@@ -154,28 +157,34 @@ func buildProxy(cfg config.Config, logger *slog.Logger, reg *metrics.Registry, l
 }
 
 // buildAdmin constructs the admin panel handler when it is enabled, or returns
-// nil so the router leaves the admin path unmounted. When no password hash is
-// configured, a random password is generated and printed once to the logs.
+// nil — leaving the panel unmounted — when it cannot be started safely. A
+// missing or malformed password hash is such a case: the alternative was
+// printing a generated credential into the logs, where it stays forever.
 func buildAdmin(cfg config.Config, logger *slog.Logger, live *settings.Settings, access *admin.AccessStore) http.Handler {
 	if !cfg.AdminEnabled {
 		return nil
 	}
 	hash := cfg.AdminPasswordHash
 	if hash == "" {
-		password, generated, err := randomAdminPassword()
-		if err != nil {
-			logger.Error("failed to generate admin password; admin panel disabled", "error", err)
-			return nil
-		}
-		hash = generated
-		logger.Warn("no BUMSHI_ADMIN_PASSWORD_HASH set — generated a temporary admin password (shown once)",
-			"username", cfg.AdminUsername, "password", password)
+		// A generated password had to be printed to be usable, which wrote a
+		// working credential into journald permanently, where it long outlives
+		// the session it was meant for. Refusing is the honest alternative: the
+		// operator runs one command and sets a hash they control.
+		logger.Error("admin panel not started: no BUMSHI_ADMIN_PASSWORD_HASH is set. " +
+			"Generate one with `bumshid hash-password` and put it in /etc/bumshi/bumshi.env, then restart")
+		return nil
+	}
+	if _, err := auth.VerifyPassword(hash, ""); err != nil {
+		// Checked at startup rather than at the first login attempt, where it
+		// surfaced only as "invalid credentials".
+		logger.Error("admin panel not started: BUMSHI_ADMIN_PASSWORD_HASH is malformed. "+
+			"Regenerate it with `bumshid hash-password`", "error", err)
+		return nil
 	}
 	return admin.New(admin.Options{
 		BasePath:     cfg.AdminPath,
 		Username:     cfg.AdminUsername,
 		PasswordHash: hash,
-		Secure:       cfg.IsProduction(),
 		PublicURL:    cfg.PublicURL,
 		Settings:     live,
 		Sessions:     auth.NewSessionStore(admin.AdminSessionTTL),
@@ -183,7 +192,27 @@ func buildAdmin(cfg config.Config, logger *slog.Logger, live *settings.Settings,
 		Access:       access,
 		Logger:       logger,
 		StartedAt:    time.Now(),
+		// Caddy runs on the same host, so a forwarded header from loopback is
+		// the real client's address; anything else is client-controlled and is
+		// not believed.
+		TrustedProxy: isLoopbackPeer,
 	})
+}
+
+// isLoopbackPeer reports whether a peer address is the local machine, which is
+// where a same-host reverse proxy connects from.
+func isLoopbackPeer(peer string) bool {
+	ip := net.ParseIP(peer)
+	return ip != nil && ip.IsLoopback()
+}
+
+// settingsPath puts the live settings file beside the access roster, or returns
+// "" when the roster itself is memory-only.
+func settingsPath(accessStorePath string) string {
+	if accessStorePath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(accessStorePath), "settings.json")
 }
 
 // selfHosts extracts the hostname from the configured public URL so the proxy
@@ -201,16 +230,6 @@ func selfHosts(publicURL string) []string {
 		return nil
 	}
 	return []string{u.Hostname()}
-}
-
-func randomAdminPassword() (password, hash string, err error) {
-	b := make([]byte, 12)
-	if _, err = rand.Read(b); err != nil {
-		return "", "", err
-	}
-	password = base64.RawURLEncoding.EncodeToString(b)
-	hash, err = auth.HashPassword(password)
-	return password, hash, err
 }
 
 // Run starts both listeners and blocks until ctx is canceled or a listener

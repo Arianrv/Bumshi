@@ -98,6 +98,84 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the token as an HttpOnly cookie; the access log redacts that path so the token
   never reaches disk.
 
+### Admin panel, privacy and configuration
+- **The service refuses to start as an open relay.** An enabled proxy with
+  `PROXY_REQUIRE_TOKEN` off lets anyone who learns the domain route traffic
+  through the operator's IP, and that was the installer's default. Token
+  enforcement is now the shipped default, and starting without it requires
+  `BUMSHI_PROXY_ALLOW_OPEN_RELAY=true` to say so deliberately.
+- **Configuration no longer fails open.** A malformed `BUMSHI_*` value silently
+  fell back to its default, so `PROXY_REQUIRE_TOKEN=ture` read as `false` and
+  disabled a security control without a word. Parse errors are collected and
+  reported, and the service refuses to start.
+- **Access logging no longer records a browsing history.** With logging on, every
+  request wrote `/p/<base64url(target)>` — the full URL of the page, decodable in
+  one command. The proxy prefix survives for rate and error analysis; the target
+  does not.
+- **Login rate limiting sees the real client.** Keyed on `RemoteAddr`, which
+  behind a reverse proxy is always the proxy, it was a single shared bucket:
+  any attacker could exhaust it and lock the operator out of their own panel.
+  Forwarding headers are now read, but only from a trusted (loopback) peer,
+  since otherwise a client could mint a fresh identity per request.
+- **A malformed admin password hash is reported instead of swallowed**, at
+  startup rather than as "invalid credentials" on every login attempt, and the
+  panel no longer generates a password and prints it into the logs, where it
+  outlives the session it was meant for.
+- **Panel settings persist.** Switching the proxy off found it back on after any
+  restart — a safety switch that silently undid itself.
+- `PUBLIC_URL` is validated and required when the panel is enabled (it was
+  producing connection links that every client silently refused), an empty
+  `ACCESS_STORE_PATH` now really does disable persistence, cookie `Secure`
+  follows the request's actual transport rather than the environment's name,
+  logout takes the CSRF check like every other mutation, unknown admin paths
+  404 instead of serving the app shell, the settings API rejects unknown fields
+  and modules, and the access-user listing no longer hands every token to the
+  browser on page load.
+
+### Android app
+- **A web page can no longer take over the proxy.** `bumshi://connect#…` links
+  were applied silently, and the intent filter is exported and BROWSABLE — so
+  any page could repoint every request the user makes through a server of its
+  choosing, invisibly. Connecting now requires an explicit confirmation naming
+  the domain being trusted.
+- **Connection links are validated.** The `url` field had to be a bare hostname
+  and was not checked, so `evil.com/path?x=` or `real.com@evil.com` were
+  accepted and silently redirected all traffic. Hostnames, token shape and label
+  are now validated, and a stored instance that fails today's rules is dropped.
+- **Private ("Hiss") tabs no longer wipe the whole cookie jar.** Closing one
+  called `removeSessionCookies(null)`, signing the user out of every site in
+  every normal tab while leaving the private tab's own persistent cookies
+  behind — wrong in both directions. The app now deletes exactly the cookies of
+  the sites that tab visited, using the same scope names the proxy assigns.
+  Storage still cannot be isolated per tab (WebView has one data directory per
+  process), and the strings say so rather than promising incognito.
+- **Camera and microphone ask every time.** After the first OS grant, any page
+  was given the camera or mic silently — and because all proxied sites share one
+  origin, WebView's own per-origin prompt cannot tell them apart either. The app
+  prompts against the real site.
+- **The app can no longer be made permanently unlaunchable.** A keystore reset
+  or restore-from-backup made `EncryptedSharedPreferences` throw out of
+  `onCreate`, with no recovery short of reinstalling. Storage failures are now
+  contained: the unreadable store is discarded and recreated, and failing that
+  the browser still starts.
+- **Plaintext HTTP is refused** (`usesCleartextTraffic=false` plus a network
+  security config), and the WebView no longer loads mixed content.
+- **External links work**: `intent:`, `tel:`, `mailto:` and `market:` used to
+  dead-end on an error page. `intent:` URLs are stripped of their component,
+  package and selector before launching — a page must not be able to reach a
+  component the user did not choose — with `browser_fallback_url` honoured.
+- Downloads are named after the real URL rather than the base64 proxy token, and
+  a private tab's downloads stay out of the shared Downloads folder.
+- History writes moved off the UI thread (they re-serialised up to 500 entries
+  on every page load), background tabs are paused when the app is, the tab
+  switcher no longer acts on stale indices, and toggling the proxy on a blank
+  tab no longer runs a web search for "about:blank".
+- **Release builds cannot be debug-signed.** The build fell back to the debug
+  key when no keystore was present, which ships a key whose password is public
+  and produces an APK no properly signed build can ever update. R8 is enabled
+  and `versionCode` comes from the build invocation instead of being pinned
+  at 1.
+
 ### Added
 - **Control plane (`bumshid`)**: hardened HTTP server with timeouts, graceful
   shutdown, request IDs, panic recovery, security headers, health/readiness,

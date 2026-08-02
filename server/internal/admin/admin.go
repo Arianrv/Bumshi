@@ -40,7 +40,6 @@ type Options struct {
 	BasePath     string // must start and end with '/', e.g. "/admin/"
 	Username     string
 	PasswordHash string
-	Secure       bool   // set the Secure flag on cookies (true behind HTTPS)
 	PublicURL    string // base URL end users connect to (for connection links)
 	Settings     *settings.Settings
 	Sessions     *auth.SessionStore
@@ -48,6 +47,10 @@ type Options struct {
 	Access       *AccessStore
 	Logger       *slog.Logger
 	StartedAt    time.Time
+	// TrustedProxy reports whether a peer address is a reverse proxy whose
+	// forwarding headers may be believed. Nil means trust nothing, so the peer
+	// address is used as-is.
+	TrustedProxy func(peer string) bool
 }
 
 // Handler is the admin panel HTTP handler. Mount it under Options.BasePath.
@@ -64,10 +67,13 @@ func New(o Options) *Handler {
 	h := &Handler{opts: o}
 	b := o.BasePath
 	m := http.NewServeMux()
-	m.HandleFunc("GET "+b, h.serveApp)
+	// "{$}" so only the base path itself matches. A bare "GET /admin/" is a
+	// subtree pattern, so every unrouted path under it served the app shell and
+	// a typo looked like a working page.
+	m.HandleFunc("GET "+b+"{$}", h.serveApp)
 	m.HandleFunc("GET "+b+"login", h.serveLogin)
 	m.HandleFunc("POST "+b+"login", h.handleLogin)
-	m.HandleFunc("POST "+b+"logout", h.handleLogout)
+	m.HandleFunc("POST "+b+"logout", h.authCSRF(h.handleLogout))
 	m.HandleFunc("GET "+b+"assets/{file}", h.serveAsset)
 	m.HandleFunc("GET "+b+"api/status", h.auth(h.apiStatus))
 	m.HandleFunc("GET "+b+"api/settings", h.auth(h.apiGetSettings))
@@ -172,7 +178,7 @@ func (h *Handler) writeAsset(w http.ResponseWriter, r *http.Request, name, conte
 // --- login / logout ---
 
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
+	ip := clientIP(r, h.opts.TrustedProxy)
 	if !h.opts.Logins.Allow(ip) {
 		writeJSON(w, http.StatusTooManyRequests, errBody("too many attempts, please wait"))
 		return
@@ -188,7 +194,16 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userOK := subtle.ConstantTimeCompare([]byte(body.Username), []byte(h.opts.Username)) == 1
-	passOK, _ := auth.VerifyPassword(h.opts.PasswordHash, body.Password)
+	passOK, err := auth.VerifyPassword(h.opts.PasswordHash, body.Password)
+	if err != nil {
+		// The stored hash is malformed, so no password can ever match it. This
+		// used to be swallowed, leaving the operator locked out with nothing but
+		// "invalid credentials" to go on.
+		h.opts.Logger.Error("BUMSHI_ADMIN_PASSWORD_HASH is malformed; no login can succeed. Regenerate it with `bumshid hash-password`",
+			"error", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("the server's admin password hash is not valid; see the service logs"))
+		return
+	}
 	if !userOK || !passOK {
 		h.opts.Logger.Warn("failed admin login", "ip", ip)
 		writeJSON(w, http.StatusUnauthorized, errBody("invalid credentials"))
@@ -201,8 +216,8 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.opts.Logins.Reset(ip)
-	h.setCookie(w, sessionCookie, token, true)
-	h.setCookie(w, csrfCookie, csrf, false) // readable by JS (double-submit)
+	h.setCookie(w, r, sessionCookie, token, true)
+	h.setCookie(w, r, csrfCookie, csrf, false) // readable by JS (double-submit)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "redirect": h.opts.BasePath})
 }
 
@@ -210,8 +225,8 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		h.opts.Sessions.Delete(c.Value)
 	}
-	h.clearCookie(w, sessionCookie)
-	h.clearCookie(w, csrfCookie)
+	h.clearCookie(w, r, sessionCookie)
+	h.clearCookie(w, r, csrfCookie)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "redirect": h.opts.BasePath + "login"})
 }
 
@@ -236,8 +251,14 @@ func (h *Handler) apiGetSettings(w http.ResponseWriter, _ *http.Request) {
 
 func (h *Handler) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 	var snap settings.Snapshot
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes)).Decode(&snap); err != nil {
+	dec := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&snap); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid request"))
+		return
+	}
+	if err := settings.Validate(snap); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 		return
 	}
 	h.opts.Settings.Apply(snap)
@@ -245,14 +266,28 @@ func (h *Handler) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.opts.Settings.Snapshot())
 }
 
+// userView is what the panel sees. The token is deliberately absent: it is a
+// bearer credential, and the roster listing had been handing every one of them
+// out on a page load. The connection link still carries it, because that is the
+// one place it is actually needed.
 type userView struct {
-	AccessUser
-	Link    string `json:"link"`
-	Expired bool   `json:"expired"`
+	ID      string     `json:"id"`
+	Label   string     `json:"label"`
+	Created time.Time  `json:"created"`
+	Expires *time.Time `json:"expires,omitempty"`
+	Link    string     `json:"link"`
+	Expired bool       `json:"expired"`
 }
 
 func newUserView(u AccessUser, link string) userView {
-	return userView{AccessUser: u, Link: link, Expired: u.Expired()}
+	return userView{
+		ID:      u.ID,
+		Label:   u.Label,
+		Created: u.Created,
+		Expires: u.Expires,
+		Link:    link,
+		Expired: u.Expired(),
+	}
 }
 
 func (h *Handler) apiListUsers(w http.ResponseWriter, _ *http.Request) {
@@ -273,6 +308,13 @@ func (h *Handler) apiCreateUser(w http.ResponseWriter, r *http.Request) {
 	label := strings.TrimSpace(body.Label)
 	if label == "" {
 		label = "user"
+	}
+	if len(label) > 64 {
+		label = label[:64]
+	}
+	if body.ExpiresDays < 0 || body.ExpiresDays > 3650 {
+		writeJSON(w, http.StatusBadRequest, errBody("expiresDays must be between 0 and 3650"))
+		return
 	}
 	var expires *time.Time
 	if body.ExpiresDays > 0 {
@@ -319,23 +361,45 @@ func (h *Handler) connectionLink(u AccessUser) string {
 
 // --- cookies & helpers ---
 
+// isSecureRequest reports whether this request actually arrived over TLS.
+//
+// Secure used to be derived from BUMSHI_ENV, which says nothing about the
+// transport: a production deployment reached over plain HTTP got Secure cookies
+// the browser then refused to send, and a development one behind TLS got
+// cookies without it. The panel is normally reached over an SSH tunnel (plain
+// HTTP to localhost, where Secure would break login) or through a TLS
+// terminator, so the answer has to be per request.
+func (h *Handler) isSecureRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	// Only believed from a trusted peer: it is a client-settable header.
+	peer := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(peer); err == nil {
+		peer = host
+	}
+	if h.opts.TrustedProxy != nil && h.opts.TrustedProxy(peer) {
+		return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	}
+	return false
+}
+
 // setCookie writes an admin cookie scoped to the panel's base path.
 //
-// gosec's G124 cannot prove these attributes are safe because two of them are
-// deliberately dynamic: Secure comes from configuration (it is off only for
-// local HTTP development), and the CSRF cookie must stay readable by
-// JavaScript for the double-submit check, so HttpOnly is false for that one by
-// design. SameSite is always Strict.
+// gosec's G124 cannot prove these attributes are safe because two are
+// deliberately dynamic: Secure follows the request's actual transport, and the
+// CSRF cookie must stay readable by JavaScript for the double-submit check, so
+// HttpOnly is false for that one by design. SameSite is always Strict.
 //
 //nolint:gosec // G124: dynamic by design, see above
-func (h *Handler) setCookie(w http.ResponseWriter, name, value string, httpOnly bool) {
+func (h *Handler) setCookie(w http.ResponseWriter, r *http.Request, name, value string, httpOnly bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    value,
 		Path:     h.opts.BasePath,
 		MaxAge:   int(AdminSessionTTL.Seconds()),
 		HttpOnly: httpOnly,
-		Secure:   h.opts.Secure,
+		Secure:   h.isSecureRequest(r),
 		SameSite: http.SameSiteStrictMode,
 	})
 }
@@ -343,15 +407,15 @@ func (h *Handler) setCookie(w http.ResponseWriter, name, value string, httpOnly 
 // clearCookie expires an admin cookie. Secure mirrors setCookie, so gosec's
 // G124 flags it for the same reason.
 //
-//nolint:gosec // G124: Secure is configuration-driven, see setCookie
-func (h *Handler) clearCookie(w http.ResponseWriter, name string) {
+//nolint:gosec // G124: Secure follows the transport, see setCookie
+func (h *Handler) clearCookie(w http.ResponseWriter, r *http.Request, name string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    "",
 		Path:     h.opts.BasePath,
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   h.opts.Secure,
+		Secure:   h.isSecureRequest(r),
 		SameSite: http.SameSiteStrictMode,
 	})
 }
@@ -364,9 +428,35 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func errBody(msg string) map[string]string { return map[string]string{"error": msg} }
 
-func clientIP(r *http.Request) string {
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
+// clientIP identifies the client for rate limiting.
+//
+// The panel runs behind a reverse proxy, so RemoteAddr is that proxy — every
+// attempt from everywhere looked like one client at 127.0.0.1, which turned the
+// limiter into a single shared bucket: any attacker could exhaust it and lock
+// the real operator out of their own panel, and the logged IP was useless.
+//
+// A forwarded header is only believed when the immediate peer is a trusted
+// proxy, because anything else is a header the client itself controls — reading
+// it unconditionally would let an attacker mint a fresh identity per request and
+// bypass the limiter entirely.
+func clientIP(r *http.Request, trusted func(string) bool) string {
+	peer := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(peer); err == nil {
+		peer = host
 	}
-	return r.RemoteAddr
+	if trusted == nil || !trusted(peer) {
+		return peer
+	}
+	// Right-most entry: the one the trusted proxy itself observed. Earlier
+	// entries can be forged by the client.
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		if ip := strings.TrimSpace(parts[len(parts)-1]); ip != "" {
+			return ip
+		}
+	}
+	if ip := strings.TrimSpace(r.Header.Get("X-Real-Ip")); ip != "" {
+		return ip
+	}
+	return peer
 }

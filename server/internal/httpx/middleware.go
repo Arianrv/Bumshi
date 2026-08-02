@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bumshi/bumshi/server/internal/metrics"
@@ -164,15 +165,29 @@ func AccessLog(logger *slog.Logger, enabled func() bool) Middleware {
 // redactedPaths carry a secret in the URL and must never be written to a log.
 var redactedPaths = []string{"/__bumshi__/auth"}
 
-// redactPath replaces a secret-bearing path with a placeholder.
+// redactPath keeps user traffic out of the log even when logging is on.
+//
+// A proxied path is "/p/<base64url(the full target URL)>". Logging it verbatim
+// records, in a trivially decodable form, every page every user visits — which
+// is precisely the record this project promises not to keep. The proxy prefix is
+// kept so the line is still useful for rate and error analysis; the target is
+// not. Secret-bearing paths are replaced outright.
 func redactPath(path string) string {
 	for _, p := range redactedPaths {
 		if path == p {
 			return p + " (redacted)"
 		}
 	}
+	if strings.HasPrefix(path, proxyPathPrefix) {
+		return proxyPathPrefix + "(redacted)"
+	}
 	return path
 }
+
+// proxyPathPrefix mirrors internal/proxy/link.Prefix. It is duplicated rather
+// than imported to keep this package free of a dependency on the proxy; the
+// test asserts the two stay equal.
+const proxyPathPrefix = "/p/"
 
 // responseRecorder captures the status code and byte count of a response while
 // transparently delegating to the underlying ResponseWriter.

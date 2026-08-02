@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -12,6 +13,9 @@ var knownKeys = []string{
 	"ENV", "LISTEN_ADDR", "METRICS_ADDR", "LOG_LEVEL", "LOG_FORMAT", "ACCESS_LOG",
 	"READ_TIMEOUT", "READ_HEADER_TIMEOUT", "WRITE_TIMEOUT", "IDLE_TIMEOUT", "SHUTDOWN_TIMEOUT",
 	"PROXY_ENABLED", "PROXY_REWRITE_MAX_BYTES", "PROXY_RESPONSE_HEADER_TIMEOUT",
+	"PROXY_FORCE_IPV4", "PROXY_REQUIRE_TOKEN", "PROXY_ALLOW_OPEN_RELAY",
+	"ADMIN_ENABLED", "ADMIN_ADDR", "ADMIN_PATH", "ADMIN_USERNAME",
+	"ADMIN_PASSWORD_HASH", "PUBLIC_URL",
 }
 
 func clearEnv(t *testing.T) {
@@ -139,5 +143,81 @@ func TestLoadBadDurationFallsBackToDefault(t *testing.T) {
 	}
 	if cfg.WriteTimeout != 30*time.Second {
 		t.Errorf("WriteTimeout = %v, want default 30s", cfg.WriteTimeout)
+	}
+}
+
+func TestParseErrorsAreFatalNotSilent(t *testing.T) {
+	clearEnv(t)
+	// A typo used to fall back to the default without a word, so
+	// PROXY_REQUIRE_TOKEN=ture read as false and left the proxy open.
+	t.Setenv("BUMSHI_PROXY_REQUIRE_TOKEN", "ture")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("a malformed boolean must not be silently ignored")
+	}
+	if !strings.Contains(err.Error(), "PROXY_REQUIRE_TOKEN") {
+		t.Errorf("the error should name the offending variable: %v", err)
+	}
+}
+
+func TestRefusesToStartAnOpenRelay(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("BUMSHI_PROXY_ENABLED", "true")
+	t.Setenv("BUMSHI_PROXY_REQUIRE_TOKEN", "false")
+	if _, err := Load(); err == nil {
+		t.Fatal("an enabled proxy with no access control must refuse to start")
+	}
+
+	// ...unless the operator says so deliberately.
+	t.Setenv("BUMSHI_PROXY_ALLOW_OPEN_RELAY", "true")
+	if _, err := Load(); err != nil {
+		t.Fatalf("an acknowledged open relay should start: %v", err)
+	}
+}
+
+func TestEmptyAccessStorePathDisablesPersistence(t *testing.T) {
+	clearEnv(t)
+	// The documented RAM-only mode was unreachable: an empty value was treated
+	// as unset and the default path was reapplied.
+	t.Setenv("BUMSHI_ACCESS_STORE_PATH", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AccessStorePath != "" {
+		t.Errorf("AccessStorePath = %q, want empty (RAM-only)", cfg.AccessStorePath)
+	}
+}
+
+func TestPublicURLIsValidated(t *testing.T) {
+	clearEnv(t)
+	for _, bad := range []string{"proxy.example.com", "ftp://proxy.example.com", "https://"} {
+		t.Setenv("BUMSHI_PUBLIC_URL", bad)
+		if _, err := Load(); err == nil {
+			t.Errorf("PUBLIC_URL %q should have been refused", bad)
+		}
+	}
+	t.Setenv("BUMSHI_PUBLIC_URL", "https://proxy.example.com")
+	if _, err := Load(); err != nil {
+		t.Errorf("a valid PUBLIC_URL was refused: %v", err)
+	}
+}
+
+func TestAdminPanelRequiresAPublicURL(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("BUMSHI_ADMIN_ENABLED", "true")
+	t.Setenv("BUMSHI_PUBLIC_URL", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("the panel needs a public URL: it is what connection links point at")
+	}
+}
+
+func TestAdminListenerMustNotShareTheProxyOrigin(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("BUMSHI_ADMIN_ENABLED", "true")
+	t.Setenv("BUMSHI_PUBLIC_URL", "https://proxy.example.com")
+	t.Setenv("BUMSHI_ADMIN_ADDR", "127.0.0.1:8080") // same as LISTEN_ADDR
+	if _, err := Load(); err == nil {
+		t.Fatal("sharing an origin with proxied content must be refused")
 	}
 }

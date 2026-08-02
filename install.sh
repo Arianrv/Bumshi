@@ -236,7 +236,11 @@ BUMSHI_ACCESS_LOG=false
 BUMSHI_PROXY_ENABLED=${enable_proxy}
 BUMSHI_PROXY_FORCE_IPV4=true
 # Turn on ONLY after every client is updated to send its access token:
-BUMSHI_PROXY_REQUIRE_TOKEN=false
+# Every proxied request must carry an access token issued in the panel. With
+# this off the proxy is an open relay: anyone who learns this domain can route
+# their traffic through your IP, and the service now refuses to start that way
+# unless BUMSHI_PROXY_ALLOW_OPEN_RELAY=true says so deliberately.
+BUMSHI_PROXY_REQUIRE_TOKEN=true
 
 BUMSHI_ADMIN_ENABLED=true
 # The panel listens on its own port, bound to localhost, so it never shares an
