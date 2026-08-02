@@ -1,13 +1,17 @@
-// Package rewrite performs best-effort, dependency-free URL rewriting of HTML
-// and CSS response bodies so that navigations and subresource loads are routed
-// back through the proxy.
+// Package rewrite performs dependency-free URL rewriting of HTML and CSS
+// response bodies so that navigations and subresource loads are routed back
+// through the proxy.
 //
-// Scope and honesty: this is a v1 aimed at static and lightly-dynamic pages. It
-// rewrites the common URL-bearing HTML attributes, srcset, and CSS url(). It
-// deliberately does NOT attempt to rewrite JavaScript — URLs constructed at
-// runtime are handled by the client service-worker runtime in a later milestone,
-// which is the robust way to cover fully dynamic sites. Keeping this layer
-// simple avoids the brittle JS-rewriting that plagues ad-hoc proxies.
+// HTML is scanned as markup (see scan.go), not matched with regular
+// expressions: only attribute values inside real start tags and CSS inside
+// <style> blocks and style="" attributes are rewritten. Text nodes, comments
+// and <script> bodies are copied byte-for-byte, so inline JavaScript and
+// embedded JSON survive untouched.
+//
+// Scope: this layer covers the URLs present in the markup the server sends.
+// URLs a page builds at runtime in JavaScript are handled by the browser
+// runtime in internal/webengine (service worker + in-page hooks), which is the
+// robust way to cover fully dynamic sites.
 package rewrite
 
 import (
@@ -19,12 +23,10 @@ import (
 )
 
 var (
-	// URL-bearing HTML attributes with quoted or unquoted values.
-	attrRe = regexp.MustCompile(`(?i)\b(href|src|poster|formaction|action|data-src|data-href)\s*=\s*("[^"]*"|'[^']*'|[^\s"'<>` + "`" + `]+)`)
-	// srcset requires quoting because it contains commas and spaces.
-	srcsetRe = regexp.MustCompile(`(?i)\bsrcset\s*=\s*("[^"]*"|'[^']*')`)
 	// CSS url() with optional quotes.
 	cssURLRe = regexp.MustCompile(`(?i)url\(\s*("[^"]*"|'[^']*'|[^)'"]+)\s*\)`)
+	// @import with a bare string target (the url() form is handled above).
+	cssImportRe = regexp.MustCompile(`(?i)@import\s+("[^"]*"|'[^']*')`)
 )
 
 // Classify reports whether a body of the given content-type should be rewritten,
@@ -41,68 +43,54 @@ func Classify(contentType string) (html, css bool) {
 	}
 }
 
-// HTML rewrites URL-bearing attributes, srcset, and embedded CSS url() in an
-// HTML document relative to base.
-func HTML(base *url.URL, body []byte) []byte {
-	s := string(body)
-	s = attrRe.ReplaceAllStringFunc(s, func(m string) string { return rewriteAttr(base, m) })
-	s = srcsetRe.ReplaceAllStringFunc(s, func(m string) string { return rewriteSrcset(base, m) })
-	s = cssURLRe.ReplaceAllStringFunc(s, func(m string) string { return rewriteCSSURL(base, m) })
-	return []byte(s)
+// HTML rewrites the URL-bearing attributes and embedded CSS of an HTML document.
+// References resolve against the document's base URL, which is target unless the
+// document carries a <base href>.
+func HTML(target *url.URL, body []byte) []byte {
+	src := string(body)
+	r := &htmlScanner{src: src, base: documentBase(src, target)}
+	r.out.Grow(len(src) + len(src)/8)
+	r.run()
+	return []byte(r.out.String())
 }
 
-// CSS rewrites url() references in a stylesheet relative to base.
+// CSS rewrites url() and @import references in a stylesheet relative to base.
 func CSS(base *url.URL, body []byte) []byte {
-	out := cssURLRe.ReplaceAllStringFunc(string(body), func(m string) string { return rewriteCSSURL(base, m) })
-	return []byte(out)
+	return []byte(rewriteCSS(base, string(body)))
 }
 
-func rewriteAttr(base *url.URL, m string) string {
-	g := attrRe.FindStringSubmatch(m)
-	if g == nil {
-		return m
-	}
-	name, raw := g[1], g[2]
-	quote, val := splitQuoted(raw)
-	nv := link.Resolve(base, val)
-	if nv == val {
-		return m
-	}
-	if quote == "" {
-		quote = `"`
-	}
-	return name + "=" + quote + nv + quote
-}
-
-func rewriteSrcset(base *url.URL, m string) string {
-	g := srcsetRe.FindStringSubmatch(m)
-	if g == nil {
-		return m
-	}
-	quote, val := splitQuoted(g[1])
-	parts := strings.Split(val, ",")
-	for i, p := range parts {
-		fields := strings.Fields(strings.TrimSpace(p))
-		if len(fields) == 0 {
-			continue
+// rewriteCSS rewrites every reference in a block of CSS. Values that do not
+// change are returned exactly as written, so the stylesheet is not reformatted.
+func rewriteCSS(base *url.URL, css string) string {
+	out := cssURLRe.ReplaceAllStringFunc(css, func(m string) string {
+		g := cssURLRe.FindStringSubmatch(m)
+		if g == nil {
+			return m
 		}
-		fields[0] = link.Resolve(base, fields[0])
-		parts[i] = strings.Join(fields, " ")
-	}
-	return "srcset=" + quote + strings.Join(parts, ", ") + quote
-}
+		quote, val := splitQuoted(g[1])
+		next := link.Resolve(base, val)
+		if next == val {
+			return m
+		}
+		if quote == "" {
+			quote = `"`
+		}
+		return "url(" + quote + next + quote + ")"
+	})
 
-func rewriteCSSURL(base *url.URL, m string) string {
-	g := cssURLRe.FindStringSubmatch(m)
-	if g == nil {
-		return m
-	}
-	quote, val := splitQuoted(g[1])
-	nv := link.Resolve(base, val)
-	if quote == "" {
-		quote = `"`
-	}
-	return "url(" + quote + nv + quote + ")"
+	return cssImportRe.ReplaceAllStringFunc(out, func(m string) string {
+		g := cssImportRe.FindStringSubmatch(m)
+		if g == nil {
+			return m
+		}
+		quote, val := splitQuoted(g[1])
+		next := link.Resolve(base, val)
+		if next == val {
+			return m
+		}
+		// g[1] is the trailing quoted string of the match.
+		return m[:len(m)-len(g[1])] + quote + next + quote
+	})
 }
 
 // splitQuoted separates an optional surrounding quote from a value.

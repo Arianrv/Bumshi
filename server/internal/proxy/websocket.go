@@ -52,7 +52,7 @@ func headerContainsToken(h http.Header, key, token string) bool {
 // serveWebSocket transparently tunnels a WebSocket connection to target. After
 // relaying the handshake it copies bytes in both directions without parsing
 // frames, so any WebSocket subprotocol works.
-func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL) {
+func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL, rc *http.ResponseController) {
 	dialCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
@@ -85,17 +85,26 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, target 
 		return
 	}
 
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
+	// Hijack through the ResponseController rather than a type assertion on w.
+	// Every request is wrapped by middleware whose ResponseWriter embeds the
+	// http.ResponseWriter *interface*, so only Header/Write/WriteHeader are
+	// promoted: a `w.(http.Hijacker)` assertion can never succeed and every
+	// upgrade failed with 500. ResponseController walks the Unwrap chain to the
+	// real connection.
+	clientConn, clientRW, err := rc.Hijack()
+	if err != nil {
 		h.count("upstream_error")
+		h.logger.ErrorContext(r.Context(), "websocket hijack failed", "error", err)
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	clientConn, clientRW, err := hijacker.Hijack()
-	if err != nil {
-		return
-	}
 	defer clientConn.Close()
+
+	// Deadlines armed by the HTTP server before the handler ran survive Hijack,
+	// so without this the tunnel is severed BUMSHI_WRITE_TIMEOUT after the
+	// request began. The connection is ours now, for as long as both ends hold
+	// it open.
+	_ = clientConn.SetDeadline(time.Time{})
 
 	if err := writeClientHandshake(clientRW, upResp.Header); err != nil {
 		return

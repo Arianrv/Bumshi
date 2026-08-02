@@ -97,6 +97,74 @@ func TestMetricsMiddlewareRecordsStatus(t *testing.T) {
 	}
 }
 
+// fullChain mirrors the middleware stack server.New composes, so these tests
+// fail if any layer breaks a capability the proxy depends on.
+func fullChain(h http.Handler) http.Handler {
+	return Chain(h,
+		RequestID(),
+		Metrics(metrics.NewHTTPCollectors(metrics.NewRegistry())),
+		Recoverer(discardLogger()),
+		SecurityHeaders(),
+		AccessLog(discardLogger(), func() bool { return true }),
+	)
+}
+
+func TestChainPreservesHijack(t *testing.T) {
+	// The proxy's WebSocket tunnel hijacks the connection. Middleware wraps the
+	// ResponseWriter in a type that embeds the http.ResponseWriter *interface*,
+	// so only Header/Write/WriteHeader are promoted and a `w.(http.Hijacker)`
+	// assertion can never succeed — every upgrade returned 500. Hijacking must
+	// go through ResponseController, which walks the Unwrap chain.
+	var hijackErr error
+	done := make(chan struct{})
+	srv := httptest.NewServer(fullChain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		c, _, err := http.NewResponseController(w).Hijack()
+		hijackErr = err
+		if err == nil {
+			_ = c.Close()
+		}
+	})))
+	defer srv.Close()
+
+	// The handler closes the hijacked connection, so the client sees an error;
+	// that is expected and not what this test asserts.
+	resp, err := http.Get(srv.URL)
+	if err == nil {
+		_ = resp.Body.Close()
+	}
+	<-done
+
+	if hijackErr != nil {
+		t.Fatalf("Hijack through the middleware chain: %v", hijackErr)
+	}
+}
+
+func TestChainPreservesFlush(t *testing.T) {
+	// Streaming responses (video, downloads, server-sent events) must be
+	// flushable through the same chain, or they sit in the output buffer.
+	var flushErr error
+	done := make(chan struct{})
+	srv := httptest.NewServer(fullChain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		_, _ = w.Write([]byte("chunk"))
+		flushErr = http.NewResponseController(w).Flush()
+	})))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	<-done
+
+	if flushErr != nil {
+		t.Fatalf("Flush through the middleware chain: %v", flushErr)
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && (indexOf(haystack, needle) >= 0)
 }

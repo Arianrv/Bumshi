@@ -37,6 +37,34 @@ func TestDecodeIgnoresTrailingSegments(t *testing.T) {
 	}
 }
 
+func TestDecodeRequestAppliesFormQuery(t *testing.T) {
+	// A GET form whose action is a proxy link submits to "/p/<token>?q=...".
+	// HTML form submission replaces the action URL's own query, so must we.
+	u, err := DecodeRequest(EncodeString("https://example.com/search?old=1"), "q=new&page=2")
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	if got, want := u.String(), "https://example.com/search?q=new&page=2"; got != want {
+		t.Errorf("target = %q, want %q", got, want)
+	}
+}
+
+func TestDecodeRequestKeepsEncodedQuery(t *testing.T) {
+	u, err := DecodeRequest(EncodeString("https://example.com/search?old=1"), "")
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	if got, want := u.String(), "https://example.com/search?old=1"; got != want {
+		t.Errorf("target = %q, want %q", got, want)
+	}
+}
+
+func TestDecodeRequestPropagatesDecodeErrors(t *testing.T) {
+	if _, err := DecodeRequest(Prefix+"!!!", "q=1"); err == nil {
+		t.Error("bad token should error even with a query present")
+	}
+}
+
 func TestResolveRelative(t *testing.T) {
 	base, _ := url.Parse("https://example.com/dir/page.html")
 

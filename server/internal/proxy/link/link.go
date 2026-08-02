@@ -64,6 +64,27 @@ func Decode(path string) (*url.URL, error) {
 	return u, nil
 }
 
+// DecodeRequest decodes the target of a proxy request from its escaped path and
+// applies the request's own query string.
+//
+// A query on the proxy request itself — as opposed to one inside the encoded
+// token — comes from a GET form whose action is a proxy link: the browser
+// submits to "/p/<token>?field=value". The HTML form-submission algorithm
+// replaces the action URL's own query with the form data, so this mirrors it
+// exactly. Decoding the token alone drops the submission, which makes every
+// search box on every proxied site silently return the unfiltered page.
+func DecodeRequest(escapedPath, rawQuery string) (*url.URL, error) {
+	u, err := Decode(escapedPath)
+	if err != nil {
+		return nil, err
+	}
+	if rawQuery != "" {
+		u.RawQuery = rawQuery
+		u.ForceQuery = false
+	}
+	return u, nil
+}
+
 // Resolve resolves a possibly-relative reference against base and returns the
 // proxy path pointing at the resulting absolute URL. References that are not
 // http(s) navigations (fragments, data:, javascript:, etc.) are returned

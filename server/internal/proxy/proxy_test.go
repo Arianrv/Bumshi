@@ -108,6 +108,100 @@ func TestBadTargetReturns400(t *testing.T) {
 	}
 }
 
+func TestForwardsRequestQueryString(t *testing.T) {
+	var got string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.RawQuery
+	}))
+	defer upstream.Close()
+
+	// A GET form whose action is a proxy link submits to "/p/<token>?q=...".
+	// Dropping that query made every search box on every proxied site return
+	// the unfiltered page.
+	h := newTestHandler(upstream.Client())
+	req := httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/search")+"?q=hello&page=2", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if want := "q=hello&page=2"; got != want {
+		t.Errorf("upstream query = %q, want %q", got, want)
+	}
+}
+
+func TestKeepsEncodedQueryWhenRequestHasNone(t *testing.T) {
+	var got string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.RawQuery
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(upstream.Client())
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/x?a=1"), nil))
+
+	if want := "a=1"; got != want {
+		t.Errorf("upstream query = %q, want %q", got, want)
+	}
+}
+
+func TestControlPlaneSecurityHeadersNotImposedOnProxiedContent(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, "<p>hi</p>")
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(upstream.Client())
+	rec := httptest.NewRecorder()
+	// Pre-set what httpx.SecurityHeaders puts on every response. Left in place,
+	// X-Frame-Options: DENY blocks every legitimate iframe inside a proxied page.
+	rec.Header().Set("X-Frame-Options", "DENY")
+	rec.Header().Set("X-Content-Type-Options", "nosniff")
+	rec.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+	h.ServeHTTP(rec, httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/page"), nil))
+
+	for _, k := range []string{"X-Frame-Options", "X-Content-Type-Options", "Cross-Origin-Opener-Policy"} {
+		if v := rec.Header().Get(k); v != "" {
+			t.Errorf("%s = %q, want it cleared for proxied content", k, v)
+		}
+	}
+}
+
+func TestUpstreamSecurityHeadersArePreserved(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		io.WriteString(w, "<p>hi</p>")
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(upstream.Client())
+	rec := httptest.NewRecorder()
+	rec.Header().Set("X-Frame-Options", "DENY")
+	h.ServeHTTP(rec, httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/page"), nil))
+
+	if got := rec.Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
+		t.Errorf("X-Frame-Options = %q, want the upstream's SAMEORIGIN", got)
+	}
+}
+
+func TestStreamedResponsesAreFlushed(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: hello\n\n")
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(upstream.Client())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/events"), nil))
+
+	if !rec.Flushed {
+		t.Error("streamed response was never flushed; SSE and long-polling would stall")
+	}
+	if got := rec.Body.String(); got != "data: hello\n\n" {
+		t.Errorf("body = %q", got)
+	}
+}
+
 func TestWebSocketToPrivateAddressBlocked(t *testing.T) {
 	h := newTestHandler(http.DefaultClient)
 	req := httptest.NewRequest("GET", link.EncodeString("http://127.0.0.1:9/socket"), nil)

@@ -129,7 +129,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		stripAccessToken(r)
 	}
-	target, err := link.Decode(r.URL.EscapedPath())
+	target, err := link.DecodeRequest(r.URL.EscapedPath(), r.URL.RawQuery)
 	if err != nil {
 		h.count("bad_request")
 		http.Error(w, "invalid proxy target", http.StatusBadRequest)
@@ -144,11 +144,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "refusing to proxy this proxy", http.StatusBadRequest)
 		return
 	}
+	// Proxied traffic is long-lived by design: video, multi-gigabyte downloads,
+	// server-sent events and WebSocket tunnels all outlive the control plane's
+	// Read/Write timeouts. Those timeouts exist to protect the small
+	// control-plane endpoints; on this path they are cleared and cancellation
+	// comes from the client's request context instead. This must happen before
+	// the WebSocket branch, because deadlines armed by the HTTP server stay on
+	// the connection after it is hijacked.
+	//
+	// Errors are ignored on purpose: a ResponseWriter that cannot carry
+	// deadlines (an httptest recorder, say) simply keeps the default behaviour.
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Time{})
+	_ = rc.SetWriteDeadline(time.Time{})
+
 	if isWebSocketUpgrade(r) {
-		h.serveWebSocket(w, r, target)
+		h.serveWebSocket(w, r, target, rc)
 		return
 	}
-	h.serveHTTP(w, r, target)
+	h.serveHTTP(w, r, target, rc)
 }
 
 // sameHost reports whether targetHost is the same host the request arrived on
@@ -184,7 +198,7 @@ func stripAccessToken(r *http.Request) {
 	}
 }
 
-func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.URL) {
+func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.URL, rc *http.ResponseController) {
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), r.Body)
 	if err != nil {
 		h.count("bad_request")
@@ -221,8 +235,28 @@ func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.
 	// Stream everything else through unchanged. Content-Length is intentionally
 	// dropped in copyResponseHeaders, so the server frames the response itself.
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	// Push the headers out ahead of the first body byte. Server-sent events and
+	// long-polling deliver nothing for a while, and the client must not be kept
+	// waiting for the server's output buffer to fill.
+	_ = rc.Flush()
+	_, _ = io.Copy(flushWriter{w: w, rc: rc}, resp.Body)
 	h.count("ok")
+}
+
+// flushWriter writes through to w and flushes after every chunk, so streamed
+// responses — video, large downloads, server-sent events, long-polling — reach
+// the client as they arrive rather than sitting in the server's output buffer.
+type flushWriter struct {
+	w  io.Writer
+	rc *http.ResponseController
+}
+
+func (fw flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if n > 0 {
+		_ = fw.rc.Flush()
+	}
+	return n, err
 }
 
 func (h *Handler) serveRewritten(w http.ResponseWriter, resp *http.Response, target *url.URL, html bool) {
@@ -291,7 +325,26 @@ var deniedRequestHeader = map[string]bool{
 	"Forwarded":         true,
 }
 
+// controlPlaneHeaders are response headers the service's own middleware sets on
+// every response (see internal/httpx.SecurityHeaders). They are right for our
+// own endpoints and wrong for third-party content: "X-Frame-Options: DENY"
+// blocks every legitimate iframe inside a proxied page — embeds, captchas,
+// payment frames — and "X-Content-Type-Options: nosniff" breaks the many sites
+// that serve CSS or JS with a sloppy Content-Type. They are cleared here so the
+// upstream's own values, copied below, are the ones the browser sees.
+var controlPlaneHeaders = []string{
+	"X-Frame-Options",
+	"X-Content-Type-Options",
+	"Referrer-Policy",
+	"Cross-Origin-Opener-Policy",
+	"Cross-Origin-Embedder-Policy",
+	"Cross-Origin-Resource-Policy",
+}
+
 func copyResponseHeaders(dst, src http.Header, base *url.URL) {
+	for _, k := range controlPlaneHeaders {
+		dst.Del(k)
+	}
 	for k, vv := range src {
 		ck := http.CanonicalHeaderKey(k)
 		switch ck {
