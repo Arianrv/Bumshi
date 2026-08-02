@@ -226,7 +226,6 @@ func accessToken(r *http.Request) string {
 	return ""
 }
 
-
 func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.URL, rc *http.ResponseController) {
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), r.Body)
 	if err != nil {
@@ -487,4 +486,3 @@ func (h *Handler) copyResponseHeaders(dst, src http.Header, base *url.URL) {
 		dst[ck] = append([]string(nil), vv...)
 	}
 }
-

@@ -137,7 +137,11 @@ func packSetCookie(raw string, target *url.URL, secure bool) (string, bool) {
 	}
 
 	scope, domainMatch := cookieScope(c.Domain, target.Hostname())
-	out := &http.Cookie{
+	// gosec G124 cannot see that these are correct: HttpOnly and Secure mirror
+	// what the target site asked for (Secure additionally forced whenever the
+	// proxy itself is HTTPS), because weakening or strengthening a site's own
+	// cookie flags would change how that site behaves. SameSite is always Lax.
+	out := &http.Cookie{ //nolint:gosec // G124: flags mirror the upstream cookie, see above
 		Name:     cookiePrefix(scope, domainMatch) + c.Name,
 		Value:    c.Value,
 		Path:     "/",

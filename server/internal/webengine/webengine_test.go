@@ -57,7 +57,7 @@ func TestInjectAfterHead(t *testing.T) {
 	headIdx := bytes.Index(out, []byte("<head>"))
 	scriptIdx := bytes.Index(out, bootstrap)
 	titleIdx := bytes.Index(out, []byte("<title>"))
-	if !(headIdx < scriptIdx && scriptIdx < titleIdx) {
+	if headIdx >= scriptIdx || scriptIdx >= titleIdx {
 		t.Errorf("bootstrap not placed right after <head> (head=%d script=%d title=%d)", headIdx, scriptIdx, titleIdx)
 	}
 }
@@ -82,7 +82,7 @@ func TestInjectHandlesHeadWithAttributes(t *testing.T) {
 	headIdx := bytes.Index(out, []byte(`<head lang="en">`))
 	scriptIdx := bytes.Index(out, bootstrap)
 	titleIdx := bytes.Index(out, []byte("<title>"))
-	if !(headIdx >= 0 && headIdx < scriptIdx && scriptIdx < titleIdx) {
+	if headIdx < 0 || headIdx >= scriptIdx || scriptIdx >= titleIdx {
 		t.Errorf("bootstrap misplaced (head=%d script=%d title=%d):\n%s", headIdx, scriptIdx, titleIdx, out)
 	}
 }
