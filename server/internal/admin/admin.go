@@ -319,6 +319,15 @@ func (h *Handler) connectionLink(u AccessUser) string {
 
 // --- cookies & helpers ---
 
+// setCookie writes an admin cookie scoped to the panel's base path.
+//
+// gosec's G124 cannot prove these attributes are safe because two of them are
+// deliberately dynamic: Secure comes from configuration (it is off only for
+// local HTTP development), and the CSRF cookie must stay readable by
+// JavaScript for the double-submit check, so HttpOnly is false for that one by
+// design. SameSite is always Strict.
+//
+//nolint:gosec // G124: dynamic by design, see above
 func (h *Handler) setCookie(w http.ResponseWriter, name, value string, httpOnly bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
@@ -331,6 +340,10 @@ func (h *Handler) setCookie(w http.ResponseWriter, name, value string, httpOnly 
 	})
 }
 
+// clearCookie expires an admin cookie. Secure mirrors setCookie, so gosec's
+// G124 flags it for the same reason.
+//
+//nolint:gosec // G124: Secure is configuration-driven, see setCookie
 func (h *Handler) clearCookie(w http.ResponseWriter, name string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,

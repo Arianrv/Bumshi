@@ -13,6 +13,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,6 +115,8 @@ func buildProxy(cfg config.Config, logger *slog.Logger, reg *metrics.Registry, l
 		ForceIPv4:       cfg.ProxyForceIPv4,
 		RequireToken:    cfg.ProxyRequireToken,
 		Authorized:      access.Authorized,
+		SecureCookies:   cfg.IsProduction(),
+		SelfHosts:       selfHosts(cfg.PublicURL),
 	})
 	engineHandler = webengine.Handler()
 	return proxyHandler, engineHandler
@@ -149,6 +153,23 @@ func buildAdmin(cfg config.Config, logger *slog.Logger, live *settings.Settings,
 		Logger:       logger,
 		StartedAt:    time.Now(),
 	})
+}
+
+// selfHosts extracts the hostname from the configured public URL so the proxy
+// can refuse to proxy itself even when an intermediary rewrites the Host header.
+func selfHosts(publicURL string) []string {
+	raw := strings.TrimSpace(publicURL)
+	if raw == "" {
+		return nil
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return nil
+	}
+	return []string{u.Hostname()}
 }
 
 func randomAdminPassword() (password, hash string, err error) {

@@ -262,6 +262,47 @@ func TestMetaContentLeftAloneWhenNotRefresh(t *testing.T) {
 	}
 }
 
+// --- subresource integrity ---
+
+func TestIntegrityDroppedOnRewrittenStylesheets(t *testing.T) {
+	base := mustURL(t, "https://example.com/")
+	// The proxy rewrites CSS bodies, so a stylesheet's hash no longer matches
+	// and the browser refuses the sheet outright: the page loads unstyled.
+	out := string(HTML(base, []byte(`<link rel="stylesheet" href="/a.css" integrity="sha384-abc" crossorigin="anonymous">`)))
+	if strings.Contains(out, "integrity") {
+		t.Errorf("integrity should be dropped from a rewritten stylesheet:\n%s", out)
+	}
+	if !strings.Contains(out, link.EncodeString("https://example.com/a.css")) {
+		t.Errorf("stylesheet href not rewritten:\n%s", out)
+	}
+	if !strings.Contains(out, `crossorigin="anonymous"`) {
+		t.Errorf("unrelated attributes should survive:\n%s", out)
+	}
+}
+
+func TestIntegrityKeptOnScripts(t *testing.T) {
+	base := mustURL(t, "https://example.com/")
+	// Script bodies are never rewritten, so their hashes still match and the
+	// protection must stay.
+	for _, in := range []string{
+		`<script src="/a.js" integrity="sha384-abc"></script>`,
+		`<link rel="modulepreload" href="/m.js" integrity="sha384-abc">`,
+		`<link rel="preload" as="font" href="/f.woff2" integrity="sha384-abc">`,
+	} {
+		if out := string(HTML(base, []byte(in))); !strings.Contains(out, "integrity") {
+			t.Errorf("integrity should be preserved:\ngot  %s\nwant it kept in %s", out, in)
+		}
+	}
+}
+
+func TestIntegrityDroppedOnPreloadedStyles(t *testing.T) {
+	base := mustURL(t, "https://example.com/")
+	out := string(HTML(base, []byte(`<link rel="preload" as="style" href="/a.css" integrity="sha384-abc">`)))
+	if strings.Contains(out, "integrity") {
+		t.Errorf("integrity should be dropped from a preloaded stylesheet:\n%s", out)
+	}
+}
+
 // --- structural safety ---
 
 func TestHTMLHandlesTruncatedMarkup(t *testing.T) {

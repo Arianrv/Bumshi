@@ -202,6 +202,97 @@ func TestStreamedResponsesAreFlushed(t *testing.T) {
 	}
 }
 
+func TestOversizedTextBodyIsServedWholeNotTruncated(t *testing.T) {
+	// A document larger than the rewrite budget used to be silently cut off at
+	// the limit, which renders broken. It must arrive complete instead, just
+	// unrewritten, with the runtime bootstrap still injected.
+	big := "<html><head></head><body>" + strings.Repeat("x", 4096) + "</body></html>"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, big)
+	}))
+	defer upstream.Close()
+
+	h := New(Options{
+		Client:          upstream.Client(),
+		Logger:          discard(),
+		Collectors:      NewCollectors(metrics.NewRegistry()),
+		RewriteMaxBytes: 64,
+		InjectHTML:      func(b []byte) []byte { return append([]byte("<!--boot-->"), b...) },
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/big"), nil))
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "<!--boot-->") {
+		t.Error("runtime bootstrap was not injected into the oversized document")
+	}
+	if !strings.HasSuffix(body, "</body></html>") {
+		t.Errorf("document was truncated; it ends with %q", body[max(0, len(body)-40):])
+	}
+	if len(body) < len(big) {
+		t.Errorf("body = %d bytes, want at least the original %d", len(body), len(big))
+	}
+}
+
+func TestBootstrapNotInjectedIntoFetchedFragments(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, "<li>row</li>")
+	}))
+	defer upstream.Close()
+
+	h := New(Options{
+		Client:     upstream.Client(),
+		Logger:     discard(),
+		Collectors: NewCollectors(metrics.NewRegistry()),
+		InjectHTML: func(b []byte) []byte { return append([]byte("<!--boot-->"), b...) },
+	})
+
+	// An absent header means a client that does not send it, where assuming
+	// "document" preserves the previous behaviour. "empty" is fetch/XHR pulling
+	// an HTML fragment, which must not get a <script> block spliced into it.
+	cases := []struct {
+		dest string
+		want bool
+	}{
+		{"document", true},
+		{"iframe", true},
+		{"", true},
+		{"empty", false},
+		{"script", false},
+	}
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/row"), nil)
+		if tc.dest != "" {
+			req.Header.Set("Sec-Fetch-Dest", tc.dest)
+		}
+		h.ServeHTTP(rec, req)
+		if got := strings.Contains(rec.Body.String(), "<!--boot-->"); got != tc.want {
+			t.Errorf("Sec-Fetch-Dest=%q: injected = %v, want %v", tc.dest, got, tc.want)
+		}
+	}
+}
+
+func TestRefusesToProxyItsOwnPublicURL(t *testing.T) {
+	h := New(Options{
+		Client:     http.DefaultClient,
+		Logger:     discard(),
+		Collectors: NewCollectors(metrics.NewRegistry()),
+		SelfHosts:  []string{"proxy.example.com"},
+	})
+	rec := httptest.NewRecorder()
+	// Arrives on a different Host than the configured public URL.
+	req := httptest.NewRequest("GET", link.EncodeString("https://proxy.example.com/p/whatever"), nil)
+	req.Host = "internal.lan:8080"
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a self-referencing target", rec.Code)
+	}
+}
+
 func TestWebSocketToPrivateAddressBlocked(t *testing.T) {
 	h := newTestHandler(http.DefaultClient)
 	req := httptest.NewRequest("GET", link.EncodeString("http://127.0.0.1:9/socket"), nil)

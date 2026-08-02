@@ -302,9 +302,20 @@ func (r *htmlScanner) run() {
 func (r *htmlScanner) writeStartTag(t htmlTag) {
 	s := r.src
 	refresh := r.isRefreshMeta(t)
+	dropIntegrity := r.rewritesOwnBody(t)
 	cur := t.start
 
 	for _, a := range t.attrs {
+		// Subresource Integrity pins the bytes of the fetched resource. The
+		// proxy rewrites stylesheet bodies, so their hashes no longer match and
+		// the browser refuses the sheet outright — the page loads unstyled.
+		// Script bodies are never rewritten, so their integrity attributes are
+		// left intact and keep protecting them.
+		if dropIntegrity && a.name == "integrity" {
+			r.out.WriteString(s[cur:a.start])
+			cur = a.end
+			continue
+		}
 		// <base href> is dropped rather than rewritten. Every URL this package
 		// emits is already an absolute proxy path, so the element has no work
 		// left to do — and either alternative is wrong: leaving the real site's
@@ -366,6 +377,34 @@ func (r *htmlScanner) newValue(tag string, a htmlAttr, refreshMeta bool) (string
 		return "", false
 	}
 	return next, next != val
+}
+
+// rewritesOwnBody reports whether the proxy will modify the bytes of the
+// resource this element points at — true only for stylesheets, whose url()
+// references are rewritten (see rewriteCSS).
+func (r *htmlScanner) rewritesOwnBody(t htmlTag) bool {
+	if t.name != "link" {
+		return false
+	}
+	for _, a := range t.attrs {
+		if !a.hasValue {
+			continue
+		}
+		value := strings.ToLower(unescapeHTML(r.src[a.valStart:a.valEnd]))
+		switch a.name {
+		case "rel":
+			for _, token := range strings.Fields(value) {
+				if token == "stylesheet" {
+					return true
+				}
+			}
+		case "as":
+			if strings.TrimSpace(value) == "style" { // <link rel=preload as=style>
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *htmlScanner) isRefreshMeta(t htmlTag) bool {

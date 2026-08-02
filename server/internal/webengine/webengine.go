@@ -67,8 +67,7 @@ func Handler() http.Handler {
 // Inject inserts the bootstrap script block into an HTML document, immediately
 // after the opening <head> tag when present, otherwise at the very start.
 func Inject(body []byte) []byte {
-	lower := bytes.ToLower(body)
-	if idx := bytes.Index(lower, []byte("<head")); idx >= 0 {
+	if idx := headOpenTag(body); idx >= 0 {
 		if gt := bytes.IndexByte(body[idx:], '>'); gt >= 0 {
 			pos := idx + gt + 1
 			out := make([]byte, 0, len(body)+len(bootstrap))
@@ -79,4 +78,29 @@ func Inject(body []byte) []byte {
 		}
 	}
 	return append(append([]byte(nil), bootstrap...), body...)
+}
+
+// headOpenTag returns the index of the document's opening <head> tag, or -1.
+//
+// The tag name must actually end there: a bare prefix search also matches
+// <header>, which in a document with no <head> would place the bootstrap in the
+// middle of the body, after the page's own scripts have already run.
+func headOpenTag(body []byte) int {
+	lower := bytes.ToLower(body)
+	for from := 0; ; {
+		i := bytes.Index(lower[from:], []byte("<head"))
+		if i < 0 {
+			return -1
+		}
+		i += from
+		end := i + len("<head")
+		if end == len(body) {
+			return -1
+		}
+		switch body[end] {
+		case '>', '/', ' ', '\t', '\n', '\f', '\r':
+			return i
+		}
+		from = end
+	}
 }

@@ -27,6 +27,18 @@ linters:
         - (*strings.Builder).WriteRune
         - fmt.Fprintf
         - fmt.Fprintln
+    gosec:
+      # This service IS a web proxy: every upstream request targets a URL the
+      # user supplied, and every response body is third-party content relayed
+      # back verbatim. gosec's taint analysis flags both by construction, on
+      # every call site, forever. SSRF is prevented where it actually can be —
+      # at dial time, by the internal/proxy/ssrfguard net.Dialer.Control hook,
+      # which inspects the resolved IP and refuses anything non-public (so it
+      # also defeats DNS rebinding). Response bodies are relayed, not rendered
+      # by us. Keep every other gosec rule on.
+      excludes:
+        - G704 # SSRF via taint analysis
+        - G705 # XSS via taint analysis
     revive:
       rules:
         - name: exported

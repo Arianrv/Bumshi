@@ -62,6 +62,31 @@ func TestInjectAfterHead(t *testing.T) {
 	}
 }
 
+func TestInjectIsNotFooledByHeaderElement(t *testing.T) {
+	// A bare "<head" prefix search also matches <header>. In a fragment with no
+	// real <head> that placed the bootstrap in the middle of the body, after the
+	// page's own scripts had already run.
+	in := []byte(`<div><header>top</header><p>body</p></div>`)
+	out := Inject(in)
+	if !bytes.HasPrefix(out, bootstrap) {
+		t.Errorf("bootstrap should be prepended when there is no <head>:\n%s", out)
+	}
+	if !bytes.Contains(out, []byte("<header>top</header>")) {
+		t.Errorf("<header> was damaged:\n%s", out)
+	}
+}
+
+func TestInjectHandlesHeadWithAttributes(t *testing.T) {
+	in := []byte(`<html><head lang="en"><title>x</title></head><body>hi</body></html>`)
+	out := Inject(in)
+	headIdx := bytes.Index(out, []byte(`<head lang="en">`))
+	scriptIdx := bytes.Index(out, bootstrap)
+	titleIdx := bytes.Index(out, []byte("<title>"))
+	if !(headIdx >= 0 && headIdx < scriptIdx && scriptIdx < titleIdx) {
+		t.Errorf("bootstrap misplaced (head=%d script=%d title=%d):\n%s", headIdx, scriptIdx, titleIdx, out)
+	}
+}
+
 func TestInjectWithoutHeadPrepends(t *testing.T) {
 	in := []byte(`<div>no head here</div>`)
 	out := Inject(in)

@@ -26,9 +26,10 @@
     // Already-proxied references must never be wrapped again, or they nest into
     // "/p/<enc(/p/<enc(...)>)>" loops. The server injects ROOT-RELATIVE proxy
     // links (e.g. "/p/<token>"); those belong to the proxy origin and must NOT
-    // be resolved against realBase() (the real site), so short-circuit on the
-    // raw prefix before resolving.
-    if (raw.indexOf(B.PREFIX) === 0 || raw.indexOf(B.ENGINE) === 0) {
+    // be resolved against realBase() (the real site), so short-circuit before
+    // resolving. isProxiedPath decodes the token rather than matching the
+    // prefix, so a target site's own "/p/product/123" is still proxied.
+    if (B.isProxiedPath(raw)) {
       return url;
     }
     try {
@@ -37,10 +38,7 @@
         return url;
       }
       // Absolute proxy URLs already on our own origin: leave untouched too.
-      if (
-        abs.origin === origin &&
-        (abs.pathname.indexOf(B.PREFIX) === 0 || abs.pathname.indexOf(B.ENGINE) === 0)
-      ) {
+      if (abs.origin === origin && B.isProxiedPath(abs.pathname)) {
         return url;
       }
       return origin + B.encodeAbsolute(abs.href);
@@ -188,6 +186,90 @@
       self.document.addEventListener("DOMContentLoaded", start);
     }
   }
+
+  // --- document.cookie ---
+  //
+  // Cookies live in the shared proxy-origin jar under scope-encoded names, so a
+  // page reading document.cookie raw would see every site's cookies wearing
+  // unrecognisable names, and a page WRITING one would store it unscoped, where
+  // the server drops it. This shim presents each page only its own cookies,
+  // under their real names.
+  //
+  // It is a compatibility layer, not a security boundary: a hostile page on this
+  // origin can still reach the unpatched accessor through a fresh iframe. The
+  // boundary that does hold is server-side — the proxy will not send one site's
+  // cookies to another, whatever the page does here.
+  (function shimCookies() {
+    if (!self.document || !B.scopePrefixes) {
+      return;
+    }
+    var proto = self.Document && self.Document.prototype;
+    var native = proto && Object.getOwnPropertyDescriptor(proto, "cookie");
+    if (!native || !native.get || !native.set) {
+      return;
+    }
+
+    function currentHost() {
+      try {
+        return new URL(realBase()).hostname;
+      } catch (e) {
+        return "";
+      }
+    }
+
+    function strip(name, prefixes) {
+      for (var i = 0; i < prefixes.length; i++) {
+        if (name.indexOf(prefixes[i]) === 0 && name.length > prefixes[i].length) {
+          return name.slice(prefixes[i].length);
+        }
+      }
+      return null;
+    }
+
+    try {
+      Object.defineProperty(self.document, "cookie", {
+        configurable: true,
+        get: function () {
+          var host = currentHost();
+          if (!host) {
+            return "";
+          }
+          var prefixes = B.scopePrefixes(host);
+          var out = [];
+          var raw = String(native.get.call(self.document) || "");
+          raw.split(";").forEach(function (pair) {
+            var eq = pair.indexOf("=");
+            if (eq < 0) {
+              return;
+            }
+            var name = strip(pair.slice(0, eq).trim(), prefixes);
+            if (name !== null) {
+              out.push(name + "=" + pair.slice(eq + 1));
+            }
+          });
+          return out.join("; ");
+        },
+        set: function (value) {
+          var host = currentHost();
+          var raw = String(value);
+          var eq = raw.indexOf("=");
+          if (!host || eq < 0) {
+            return;
+          }
+          // A page can only set a host-only cookie for the document it runs in;
+          // Domain= is dropped rather than honoured, since scoping it wider is
+          // exactly the leak this whole scheme exists to prevent.
+          var rest = raw.slice(eq + 1).split(";").filter(function (attr) {
+            return !/^\s*domain\s*=/i.test(attr) && !/^\s*path\s*=/i.test(attr);
+          });
+          var name = B.cookiePrefix(host, false) + raw.slice(0, eq).trim();
+          native.set.call(self.document, name + "=" + rest.join(";") + "; Path=/");
+        },
+      });
+    } catch (e) {
+      /* a browser that will not let us redefine it keeps the native behaviour */
+    }
+  })();
 
   // --- register the service worker (safety net) ---
   // On the very first visit the worker is not controlling this document yet, so

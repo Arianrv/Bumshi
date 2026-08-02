@@ -73,6 +73,14 @@ type Options struct {
 	// Authorized validates an access token (see admin.AccessStore.Authorized).
 	// Only consulted when RequireToken is set.
 	Authorized func(token string) bool
+	// SecureCookies marks packed cookies Secure. True whenever users reach the
+	// proxy over HTTPS, which is every real deployment.
+	SecureCookies bool
+	// SelfHosts are additional hostnames that belong to this deployment (the
+	// public URL, typically). A target pointing at one of them is a
+	// double-wrapped proxy link and is refused. The request's own Host header is
+	// always checked; this covers deployments where an intermediary rewrites it.
+	SelfHosts []string
 }
 
 // Handler is the proxy HTTP handler. Mount it under link.Prefix ("/p/").
@@ -86,6 +94,8 @@ type Handler struct {
 	forceIPv4    bool
 	requireToken bool
 	authorized   func(string) bool
+	secure       bool
+	selfHosts    []string
 }
 
 // New builds a Handler from opts.
@@ -108,7 +118,23 @@ func New(opts Options) *Handler {
 		forceIPv4:    opts.ForceIPv4,
 		requireToken: opts.RequireToken,
 		authorized:   opts.Authorized,
+		secure:       opts.SecureCookies,
+		selfHosts:    normalizeHosts(opts.SelfHosts),
 	}
+}
+
+// normalizeHosts lower-cases and de-ports a list of hostnames, dropping empties.
+func normalizeHosts(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, h := range in {
+		if host, _, err := net.SplitHostPort(h); err == nil {
+			h = host
+		}
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // ServeHTTP decodes the target from the request path and forwards the request,
@@ -119,15 +145,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Access gating: when enabled, every proxied request must carry a valid,
-	// unexpired access token. The token is stripped before the upstream fetch so
-	// it never leaks to the target site.
+	// unexpired access token. The token never reaches the target site: the
+	// upstream Cookie header is rebuilt from scratch out of the namespaced jar
+	// (see setRequestIdentity), and anything without a recognised prefix — the
+	// access token included — is left behind.
 	if h.requireToken {
 		if h.authorized == nil || !h.authorized(accessToken(r)) {
 			h.count("unauthorized")
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
-		stripAccessToken(r)
 	}
 	target, err := link.DecodeRequest(r.URL.EscapedPath(), r.URL.RawQuery)
 	if err != nil {
@@ -139,7 +166,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// host is a nested "/p/<enc(/p/...)>" self-reference (e.g. a client that
 	// double-wrapped an already-proxied link); fetching it would recurse into
 	// the proxy and spin until the context is canceled.
-	if sameHost(target.Hostname(), r.Host) {
+	if h.isSelf(target.Hostname(), r.Host) {
 		h.count("bad_request")
 		http.Error(w, "refusing to proxy this proxy", http.StatusBadRequest)
 		return
@@ -165,13 +192,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.serveHTTP(w, r, target, rc)
 }
 
-// sameHost reports whether targetHost is the same host the request arrived on
-// (ignoring any port on the request's Host header), case-insensitively.
-func sameHost(targetHost, reqHost string) bool {
-	if h, _, err := net.SplitHostPort(reqHost); err == nil {
-		reqHost = h
+// isSelf reports whether targetHost belongs to this deployment: the host the
+// request arrived on, or any configured SelfHost. Such a target is a nested
+// "/p/<enc(/p/...)>" self-reference — a client that double-wrapped an
+// already-proxied link — and fetching it would recurse into the proxy and spin
+// until the context is canceled.
+func (h *Handler) isSelf(targetHost, reqHost string) bool {
+	if targetHost == "" {
+		return false
 	}
-	return targetHost != "" && strings.EqualFold(targetHost, reqHost)
+	if host, _, err := net.SplitHostPort(reqHost); err == nil {
+		reqHost = host
+	}
+	if strings.EqualFold(targetHost, reqHost) {
+		return true
+	}
+	for _, self := range h.selfHosts {
+		if strings.EqualFold(targetHost, self) {
+			return true
+		}
+	}
+	return false
 }
 
 // accessCookie is the cookie the client app sets to carry its access token.
@@ -185,18 +226,6 @@ func accessToken(r *http.Request) string {
 	return ""
 }
 
-// stripAccessToken removes the bumshi_access cookie from the request so the
-// access token is never forwarded to the upstream site.
-func stripAccessToken(r *http.Request) {
-	cookies := r.Cookies()
-	r.Header.Del("Cookie")
-	for _, c := range cookies {
-		if c.Name == accessCookie {
-			continue
-		}
-		r.AddCookie(c)
-	}
-}
 
 func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.URL, rc *http.ResponseController) {
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), r.Body)
@@ -206,11 +235,14 @@ func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.
 		return
 	}
 	copyRequestHeaders(outReq.Header, r.Header)
+	setRequestIdentity(outReq, r, target)
 	outReq.Host = target.Host
 
 	start := time.Now()
 	resp, err := h.client.Do(outReq)
-	h.col.Upstream.Observe(time.Since(start).Seconds())
+	if h.col != nil {
+		h.col.Upstream.Observe(time.Since(start).Seconds())
+	}
 	if err != nil {
 		if errors.Is(err, ssrfguard.ErrBlockedAddress) {
 			h.count("blocked")
@@ -222,15 +254,17 @@ func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	html, css := rewrite.Classify(resp.Header.Get("Content-Type"))
-	copyResponseHeaders(w.Header(), resp.Header, target)
-
 	if html || css {
-		h.serveRewritten(w, resp, target, html)
+		// Headers are staged inside serveRewritten, only once the body has been
+		// read: staging them here would leave the upstream's Set-Cookie and
+		// friends attached to the 502 page if the read fails.
+		h.serveRewritten(w, r, resp, target, html, rc)
 		return
 	}
+	h.copyResponseHeaders(w.Header(), resp.Header, target)
 
 	// Stream everything else through unchanged. Content-Length is intentionally
 	// dropped in copyResponseHeaders, so the server frames the response itself.
@@ -259,25 +293,67 @@ func (fw flushWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (h *Handler) serveRewritten(w http.ResponseWriter, resp *http.Response, target *url.URL, html bool) {
-	body, err := io.ReadAll(io.LimitReader(resp.Body, h.rewriteMax))
+// serveRewritten buffers a text body, rewrites its URLs, and writes it back.
+//
+// Reading one byte past the limit is what distinguishes "this is the whole
+// document" from "this is the first N bytes of a larger one". A body that
+// exceeds the limit is NOT truncated — a document cut off mid-tag renders
+// broken and the failure is baffling. Instead the prefix is emitted unrewritten
+// (with the runtime bootstrap still injected, since that lands in the first few
+// hundred bytes) and the remainder streams through, leaving the service worker
+// and in-page hooks to rewrite that page's requests at fetch time.
+func (h *Handler) serveRewritten(w http.ResponseWriter, r *http.Request, resp *http.Response, target *url.URL, html bool, rc *http.ResponseController) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, h.rewriteMax+1))
 	if err != nil {
 		h.count("upstream_error")
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
+
+	if int64(len(body)) > h.rewriteMax {
+		h.logger.WarnContext(r.Context(), "text body exceeds the rewrite limit; serving it unrewritten",
+			"host", target.Host, "limit_bytes", h.rewriteMax)
+		if html && h.injectHTML != nil && shouldInject(r) {
+			body = h.injectHTML(body)
+		}
+		h.copyResponseHeaders(w.Header(), resp.Header, target)
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(body)
+		_ = rc.Flush()
+		_, _ = io.Copy(flushWriter{w: w, rc: rc}, resp.Body)
+		h.count("ok_unrewritten")
+		return
+	}
+
 	if html {
 		body = rewrite.HTML(target, body)
-		if h.injectHTML != nil {
+		if h.injectHTML != nil && shouldInject(r) {
 			body = h.injectHTML(body)
 		}
 	} else {
 		body = rewrite.CSS(target, body)
 	}
+	h.copyResponseHeaders(w.Header(), resp.Header, target)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 	h.count("ok")
+}
+
+// shouldInject reports whether the runtime bootstrap belongs in this response.
+//
+// The bootstrap is for documents. Injecting it into an HTML fragment that a
+// page fetches and drops into innerHTML corrupts that fragment, so honour the
+// browser's own Sec-Fetch-Dest signal: inject for documents and frames, never
+// for fetch/XHR. An absent header means a client that does not send it (or a
+// non-browser), where assuming "document" preserves the previous behaviour.
+func shouldInject(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Dest") {
+	case "", "document", "iframe", "frame", "embed", "object":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *Handler) count(outcome string) {
@@ -310,12 +386,49 @@ func copyRequestHeaders(dst, src http.Header) {
 	}
 }
 
-// deniedRequestHeader lists client headers we refuse to forward upstream:
+// setRequestIdentity fills in the three headers that describe who is asking:
+// Cookie, Origin and Referer. All three arrive describing the PROXY, and all
+// three must leave describing the TARGET.
+//
+// Dropping Origin and Referer outright — the previous behaviour — quietly broke
+// sign-in across a large part of the web: Django rejects any POST over HTTPS
+// with no Referer, and most CSRF middleware rejects a missing or foreign Origin.
+// Sending the proxy's own values instead would both leak the proxy URL and fail
+// the same checks. Reconstructing the target's own values is what a browser
+// talking to that site directly would send, so it discloses nothing new.
+func setRequestIdentity(out, in *http.Request, target *url.URL) {
+	if cookies := unpackCookies(in, target.Hostname()); cookies != "" {
+		out.Header.Set("Cookie", cookies)
+	} else {
+		out.Header.Del("Cookie")
+	}
+
+	// Origin is only sent by browsers on non-GET/HEAD and on CORS requests;
+	// mirror that rather than inventing one.
+	if in.Header.Get("Origin") != "" {
+		out.Header.Set("Origin", target.Scheme+"://"+target.Host)
+	}
+
+	// The incoming Referer points at a proxy URL whose token decodes to the page
+	// the user actually came from. Forward that; if it does not decode, send
+	// nothing rather than guessing.
+	if ref := in.Header.Get("Referer"); ref != "" {
+		if u, err := url.Parse(ref); err == nil {
+			if real, err := link.Decode(u.EscapedPath()); err == nil {
+				out.Header.Set("Referer", real.String())
+			}
+		}
+	}
+}
+
+// deniedRequestHeader lists client headers we refuse to copy verbatim upstream:
 // Accept-Encoding (so Go manages compression and we can rewrite text bodies),
-// Referer/Origin (avoid leaking the proxy URL / origin mismatch in v1), and any
-// forwarding headers that would disclose the client's IP.
+// Cookie/Referer/Origin (rebuilt to describe the target rather than the proxy —
+// see setRequestIdentity), and any forwarding header that would disclose the
+// client's IP.
 var deniedRequestHeader = map[string]bool{
 	"Accept-Encoding":   true,
+	"Cookie":            true,
 	"Referer":           true,
 	"Origin":            true,
 	"X-Forwarded-For":   true,
@@ -341,7 +454,7 @@ var controlPlaneHeaders = []string{
 	"Cross-Origin-Resource-Policy",
 }
 
-func copyResponseHeaders(dst, src http.Header, base *url.URL) {
+func (h *Handler) copyResponseHeaders(dst, src http.Header, base *url.URL) {
 	for _, k := range controlPlaneHeaders {
 		dst.Del(k)
 	}
@@ -356,7 +469,9 @@ func copyResponseHeaders(dst, src http.Header, base *url.URL) {
 			continue
 		case "Set-Cookie":
 			for _, c := range vv {
-				dst.Add("Set-Cookie", rewriteSetCookie(c))
+				if packed, ok := packSetCookie(c, base, h.secure); ok {
+					dst.Add("Set-Cookie", packed)
+				}
 			}
 			continue
 		case "Content-Security-Policy", "Content-Security-Policy-Report-Only":
@@ -373,30 +488,3 @@ func copyResponseHeaders(dst, src http.Header, base *url.URL) {
 	}
 }
 
-// rewriteSetCookie scopes an upstream Set-Cookie to the proxy origin by removing
-// the Domain attribute and forcing Path=/.
-//
-// Limitation (v1): cookies from different targets share the proxy origin. Robust
-// per-target isolation via a server-side, session-keyed cookie jar is a later
-// milestone.
-func rewriteSetCookie(c string) string {
-	var out []string
-	hasPath := false
-	for _, part := range strings.Split(c, ";") {
-		t := strings.TrimSpace(part)
-		low := strings.ToLower(t)
-		switch {
-		case strings.HasPrefix(low, "domain="):
-			continue
-		case strings.HasPrefix(low, "path="):
-			out = append(out, "Path=/")
-			hasPath = true
-		default:
-			out = append(out, t)
-		}
-	}
-	if !hasPath {
-		out = append(out, "Path=/")
-	}
-	return strings.Join(out, "; ")
-}

@@ -18,11 +18,14 @@ import (
 
 // wsForwardHeaders are the request headers copied verbatim into the upstream
 // WebSocket handshake.
+// Cookie is deliberately absent: it is rebuilt from the namespaced jar in
+// upstreamHandshake, exactly as it is for HTTP requests, so a socket cannot
+// carry another site's cookies or the access token upstream.
 var wsForwardHeaders = []string{
 	"Upgrade", "Connection",
 	"Sec-Websocket-Key", "Sec-Websocket-Version",
 	"Sec-Websocket-Protocol", "Sec-Websocket-Extensions",
-	"User-Agent", "Cookie", "Accept-Language",
+	"User-Agent", "Accept-Language",
 }
 
 // wsUpgradeResponseHeaders are the upstream 101 headers echoed back to the
@@ -68,7 +71,7 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, target 
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 
 	upResp, upstreamBR, err := h.upstreamHandshake(upstream, target, r)
 	if err != nil {
@@ -78,7 +81,7 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, target 
 	}
 	// A 101 has no body (http.NoBody, so Close is a no-op); on any other status
 	// this releases it. Tunneling reads from upstreamBR / the raw conn, not here.
-	defer upResp.Body.Close()
+	defer func() { _ = upResp.Body.Close() }()
 	if upResp.StatusCode != http.StatusSwitchingProtocols {
 		h.count("upstream_error")
 		http.Error(w, "upstream did not upgrade", http.StatusBadGateway)
@@ -98,7 +101,7 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, target 
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// Deadlines armed by the HTTP server before the handler ran survive Hijack,
 	// so without this the tunnel is severed BUMSHI_WRITE_TIMEOUT after the
@@ -141,6 +144,9 @@ func (h *Handler) upstreamHandshake(upstream net.Conn, target *url.URL, r *http.
 	}
 	// Present the target's own origin upstream rather than the proxy's.
 	req.Header.Set("Origin", target.Scheme+"://"+target.Host)
+	if cookies := unpackCookies(r, target.Hostname()); cookies != "" {
+		req.Header.Set("Cookie", cookies)
+	}
 
 	_ = upstream.SetWriteDeadline(time.Now().Add(15 * time.Second))
 	if err := req.Write(upstream); err != nil {
