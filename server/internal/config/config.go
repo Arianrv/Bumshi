@@ -98,6 +98,12 @@ type Config struct {
 	// AccessStorePath is the JSON file the access-user roster persists to, so
 	// users survive restarts. Empty disables persistence (RAM-only).
 	AccessStorePath string
+	// LogUpstreamHost, when non-empty, logs the full header set of every
+	// upstream request whose host contains this substring, so it can be diffed
+	// against what a browser sends directly. Diagnostic only, and off by
+	// default: it is the one thing that writes browsing to the log. See
+	// internal/proxy/debug.go.
+	LogUpstreamHost string
 }
 
 // Load reads configuration from the environment, applies defaults, and
@@ -134,6 +140,7 @@ func Load() (Config, error) {
 		// RAM-only is an empty value, and getString treats empty as unset and
 		// reapplies the default — so that mode was unreachable.
 		AccessStorePath: getStringAllowEmpty("ACCESS_STORE_PATH", "/var/lib/bumshi/access.json"),
+		LogUpstreamHost: getStringAllowEmpty("LOG_UPSTREAM_HOST", ""),
 	}
 
 	if err := errs.err(); err != nil {

@@ -151,6 +151,7 @@ func buildProxy(cfg config.Config, logger *slog.Logger, reg *metrics.Registry, l
 		Authorized:      access.Authorized,
 		SecureCookies:   cfg.IsProduction(),
 		SelfHosts:       selfHosts(cfg.PublicURL),
+		LogUpstreamHost: cfg.LogUpstreamHost,
 	})
 	engineHandler = webengine.Handler()
 	return proxyHandler, engineHandler

@@ -81,6 +81,9 @@ type Options struct {
 	// double-wrapped proxy link and is refused. The request's own Host header is
 	// always checked; this covers deployments where an intermediary rewrites it.
 	SelfHosts []string
+	// LogUpstreamHost, when non-empty, logs the full header set of every
+	// upstream request whose host contains it. Diagnostic only; see debug.go.
+	LogUpstreamHost string
 }
 
 // Handler is the proxy HTTP handler. Mount it under link.Prefix ("/p/").
@@ -96,6 +99,7 @@ type Handler struct {
 	authorized   func(string) bool
 	secure       bool
 	selfHosts    []string
+	logUpstream  string
 }
 
 // New builds a Handler from opts.
@@ -120,6 +124,7 @@ func New(opts Options) *Handler {
 		authorized:   opts.Authorized,
 		secure:       opts.SecureCookies,
 		selfHosts:    normalizeHosts(opts.SelfHosts),
+		logUpstream:  strings.ToLower(opts.LogUpstreamHost),
 	}
 }
 
@@ -236,6 +241,7 @@ func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request, target *url.
 	copyRequestHeaders(outReq.Header, r.Header)
 	setRequestIdentity(outReq, r, target)
 	outReq.Host = target.Host
+	h.logUpstreamRequest(outReq)
 
 	start := time.Now()
 	resp, err := h.client.Do(outReq)
