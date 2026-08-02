@@ -108,6 +108,101 @@ func TestBadTargetReturns400(t *testing.T) {
 	}
 }
 
+func TestAppIdentifyingHeadersAreNotForwarded(t *testing.T) {
+	// Android WebView attaches X-Requested-With: <package name> to every
+	// request. Forwarding it names the tool to every site the user visits and
+	// reads as an automated client rather than a browser.
+	var got http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(upstream.Client())
+	req := httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/page"), nil)
+	req.Header.Set("X-Requested-With", "com.bumshi.browser")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 14) Chrome/120")
+	req.Header.Set("Accept-Language", "fa-IR,fa;q=0.9")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if v := got.Get("X-Requested-With"); v != "" {
+		t.Errorf("X-Requested-With leaked upstream: %q", v)
+	}
+	// Genuine browser headers must still go through untouched.
+	if got.Get("User-Agent") == "" || got.Get("Accept-Language") == "" {
+		t.Errorf("real browser headers were dropped: %v", got)
+	}
+}
+
+func TestSecFetchSiteIsRecomputedForTheTarget(t *testing.T) {
+	// The browser computes Sec-Fetch-Site against the proxy origin, where every
+	// target looks same-origin. Forwarded unchanged next to a real Referer that
+	// says google.com, a request arriving at gstatic.com asserting same-origin
+	// is a combination no browser can produce — and anti-abuse systems check it.
+	cases := []struct {
+		name    string
+		referer string
+		target  string
+		want    string
+	}{
+		{"same origin", "https://www.google.com/", "https://www.google.com/search", "same-origin"},
+		{"same site, other subdomain", "https://www.google.com/", "https://accounts.google.com/x", "same-site"},
+		{"cross site", "https://www.google.com/", "https://www.gstatic.com/a.js", "cross-site"},
+		{"scheme differs", "http://www.google.com/", "https://www.google.com/", "same-site"},
+		{"no referer", "", "https://www.google.com/", "none"},
+		{"unparseable referer", "::nonsense::", "https://www.google.com/", "cross-site"},
+	}
+	for _, tc := range cases {
+		target := mustParse(t, tc.target)
+		if got := secFetchSite(tc.referer, target); got != tc.want {
+			t.Errorf("%s: secFetchSite(%q, %q) = %q, want %q", tc.name, tc.referer, tc.target, got, tc.want)
+		}
+	}
+}
+
+func TestSecFetchSiteReachesUpstream(t *testing.T) {
+	var got http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(upstream.Client())
+	req := httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/asset.js"), nil)
+	// A browser on the proxy origin always computes same-origin, whatever the
+	// real target is.
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Dest", "script")
+	req.Header.Set("Referer", link.EncodeString("https://www.google.com/"))
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if v := got.Get("Sec-Fetch-Site"); v != "cross-site" {
+		t.Errorf("Sec-Fetch-Site = %q, want cross-site (referer google.com, target %s)", v, upstream.URL)
+	}
+	// Dest describes the request type, not an origin relationship, so it passes
+	// through untouched.
+	if v := got.Get("Sec-Fetch-Dest"); v != "script" {
+		t.Errorf("Sec-Fetch-Dest = %q, want it forwarded unchanged", v)
+	}
+}
+
+func TestSecFetchSiteNotInventedWhenClientOmitsIt(t *testing.T) {
+	// A client that does not send the header must not suddenly acquire one:
+	// that is its own fingerprint.
+	var got http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler(upstream.Client())
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", link.EncodeString(upstream.URL+"/x"), nil))
+
+	if v := got.Get("Sec-Fetch-Site"); v != "" {
+		t.Errorf("Sec-Fetch-Site = %q, want it absent", v)
+	}
+}
+
 func TestForwardsRequestQueryString(t *testing.T) {
 	var got string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

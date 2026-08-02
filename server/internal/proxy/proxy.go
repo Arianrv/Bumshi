@@ -416,20 +416,73 @@ func setRequestIdentity(out, in *http.Request, target *url.URL) {
 	// The incoming Referer points at a proxy URL whose token decodes to the page
 	// the user actually came from. Forward that; if it does not decode, send
 	// nothing rather than guessing.
+	referer := ""
 	if ref := in.Header.Get("Referer"); ref != "" {
 		if u, err := url.Parse(ref); err == nil {
 			if real, err := link.Decode(u.EscapedPath()); err == nil {
-				out.Header.Set("Referer", real.String())
+				referer = real.String()
+				out.Header.Set("Referer", referer)
 			}
 		}
 	}
+
+	// Sec-Fetch-Site describes the same relationship the Referer does, and the
+	// browser computed it against the PROXY origin — where every target is
+	// "same-origin", because they all are. Forwarding it unchanged alongside a
+	// real Referer emits combinations that cannot occur in a browser: a request
+	// to gstatic.com, refered from google.com, asserting same-origin. That
+	// contradiction is trivial for an anti-abuse system to spot, and we only
+	// started emitting it once the Referer became real.
+	if in.Header.Get("Sec-Fetch-Site") != "" {
+		out.Header.Set("Sec-Fetch-Site", secFetchSite(referer, target))
+	}
+}
+
+// secFetchSite recomputes the request's site relationship in the target's terms.
+//
+// Registrable-domain comparison is a last-two-labels heuristic: without a public
+// suffix list "bbc.co.uk" and "news.co.uk" look related. The cost of that is a
+// "same-site" where a browser would say "cross-site" between two sites under the
+// same two-label suffix, which is a far smaller error than the impossible value
+// it replaces.
+func secFetchSite(referer string, target *url.URL) string {
+	if referer == "" {
+		return "none"
+	}
+	ref, err := url.Parse(referer)
+	if err != nil || ref.Host == "" {
+		return "cross-site"
+	}
+	if strings.EqualFold(ref.Scheme, target.Scheme) && strings.EqualFold(ref.Host, target.Host) {
+		return "same-origin"
+	}
+	if registrableDomain(ref.Hostname()) == registrableDomain(target.Hostname()) {
+		return "same-site"
+	}
+	return "cross-site"
+}
+
+// registrableDomain returns a host's last two labels, lower-cased.
+func registrableDomain(host string) string {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	parts := strings.Split(h, ".")
+	if len(parts) < 2 {
+		return h
+	}
+	return strings.Join(parts[len(parts)-2:], ".")
 }
 
 // deniedRequestHeader lists client headers we refuse to copy verbatim upstream:
 // Accept-Encoding (so Go manages compression and we can rewrite text bodies),
 // Cookie/Referer/Origin (rebuilt to describe the target rather than the proxy —
-// see setRequestIdentity), and any forwarding header that would disclose the
-// client's IP.
+// see setRequestIdentity), forwarding headers that would disclose the client's
+// IP, and headers that identify the client as an app rather than a browser.
+//
+// X-Requested-With is the one that bites: Android WebView attaches the host
+// app's package name to every request it makes. Forwarding that announces
+// "com.bumshi.browser" to every site the user visits — it identifies the tool
+// by name, links all of a user's traffic together, and reads to an anti-bot
+// system as an automated client rather than a browser.
 var deniedRequestHeader = map[string]bool{
 	"Accept-Encoding":   true,
 	"Cookie":            true,
@@ -440,6 +493,7 @@ var deniedRequestHeader = map[string]bool{
 	"X-Forwarded-Proto": true,
 	"X-Real-Ip":         true,
 	"Forwarded":         true,
+	"X-Requested-With":  true,
 }
 
 // controlPlaneHeaders are response headers the service's own middleware sets on
